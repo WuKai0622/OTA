@@ -1,0 +1,23 @@
+# ============ 本地/个人配置(不入库) ============
+.claude/
+
+# ============ 设计文档(单独管理,不入代码仓库) ============
+docs/
+
+# ============ Keil/MDK 构建产物 ============
+# 编译输出目录(.axf/.map/.o/.crf/.hex/.htm/.dep 等)
+MDK-ARM/OTA/
+# uVision 窗口布局(用户相关)
+MDK-ARM/*.uvguix.*
+# 调试器会话配置
+MDK-ARM/DebugConfig/
+# 汇编列表
+MDK-ARM/*.lst
+# fromelf 导出的固件 bin
+MDK-ARM/*.bin
+# CubeMX 自动生成的 RTE 配置
+MDK-ARM/RTE/
+
+# ============ Python 缓存 ============
+__pycache__/
+*.pyc
