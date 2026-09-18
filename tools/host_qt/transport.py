@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 统一传输通道抽象 —— UART / ETH(TCP) / wifi模组(TCP) 三个选项卡都落到同一接口。
-当前 boot 侧只有 UART；ETH/wifi 通道等 boot 侧网口驱动接入后直接复用同帧协议。
+
+boot 侧两条通道都已就绪：UART(USART3) 与 ETH(lwip/tcp server)，
+两者共用同一套帧协议与同一个接收环，上位机这边只需换传输层。
 """
+import socket
 
 
 class Transport:
@@ -54,7 +57,10 @@ class SerialTransport(Transport):
 
 
 class TcpTransport(Transport):
-    """ETH(lwip/tcp) 与 wifi模组透传共用：PC 作为 TCP client 连目标 IP:port。"""
+    """ETH(lwip/tcp) 与 wifi模组透传共用：PC 作为 TCP client 连目标 IP:port。
+
+    设备侧是 TCP 服务器（见 boot 的 ota_net.c），单连接模型：新连接顶掉旧连接。
+    """
     def __init__(self, host: str, port: int, label: str = "TCP"):
         self.host = host
         self.port = int(port)
@@ -62,7 +68,6 @@ class TcpTransport(Transport):
         self._sock = None
 
     def open(self):
-        import socket
         s = socket.create_connection((self.host, self.port), timeout=3.0)
         s.settimeout(0.05)
         self._sock = s
@@ -71,6 +76,9 @@ class TcpTransport(Transport):
         self._sock.sendall(data)
 
     def recv(self, n: int, timeout: float) -> bytes:
+        """★ socket 必须是模块级导入。
+        写成函数内 import 的话，下面的 except 子句在求值 socket.timeout 时会
+        抛 NameError —— 而这恰恰发生在"每次读超时"这条最常走的路径上。"""
         self._sock.settimeout(timeout)
         try:
             return self._sock.recv(n)
@@ -80,14 +88,16 @@ class TcpTransport(Transport):
             return b""
 
     def flush_rx(self):
-        try:
-            import socket
-            self._sock.settimeout(0.05)
-            while True:
+        """把连接建立前积压的数据读空。socket 超时即认为读空。"""
+        self._sock.settimeout(0.05)
+        while True:
+            try:
                 if not self._sock.recv(4096):
-                    break
-        except Exception:
-            pass
+                    break           # b"" = 对端已关闭
+            except socket.timeout:
+                break               # 读空，完成
+            except OSError:
+                break
 
     def close(self):
         if self._sock is not None:

@@ -16,8 +16,10 @@ import struct
 PKT_HEAD = b"\xA5\x5A"
 FRAME_DATA_MAX = 1024   # 单帧数据区上限（boot 侧协议硬上限，帧总长上限 12+1024）
 OTA_DATA_CHUNK = 1024   # 实际每个 DATA 帧携带的固件字节数(=boot 侧 FRAME_DATA_MAX 上限)。
-                        # HC-05 已降至 9600 无黑障，推到上限=帧数最少，往返延迟/停顿开销最低
-                        # (12992B → 13 帧；介质耗时 ~13.5s 是 9600 的硬底，省的是帧固定开销)
+                        # 取满上限=帧数最少，帧固定开销摊到最薄（128KB 固件 128 帧）。
+                        # ETH 通道下帧总长 12+1024=1036B，加 TCP/IP 头 ~40B 仍 < MTU 1500，
+                        # 不会被 IP 分片 —— 这也是 boot 侧 lwipopts.h 要把 TCP_MSS
+                        # 提到 1460 的原因（536 会把这个帧拆成 2 个 TCP 段）。
 
 # 命令码（与 protocol.h 一致）
 CMD_OTA_START = 0x0001   # PC->boot：开始，数据=固件总长 u32 LE，RSV=目标区(0=A)
@@ -28,7 +30,9 @@ CMD_RSP_ACK = 0x0100     # boot->PC：应答，数据=状态码 1B(0=OK,1=ERR)
 RSP_OK = 0
 RSP_ERR = 1
 
-APP_MAX_SIZE = 15360     # 固件上限 15KB（A/B 区大小，与 flash_if.h 一致）
+APP_MAX_SIZE = 131072    # 固件上限 128KB —— 与 F407 工程 flash_if.h 的 APP_MAX_SIZE 一致。
+                         # (F103 版本是 15360；本工程已移植到 F407ZGT6，boot 镜像本身就
+                         #  有 77KB，沿用旧的 15KB 上限会让任何固件都在发包前被拒)
 
 
 def _build_table():
@@ -83,8 +87,8 @@ def build_ota_end(total_len: int) -> bytes:
 
 
 def split_firmware(bin_: bytes) -> "list[tuple[int, bytes]]":
-    """按 OTA_DATA_CHUNK(默认 256B)分包，返回 [(offset, chunk)]。offset 恒为
-    256 倍数（偶数对齐，满足 boot 侧 Flash_ProgramBytes 半字对齐约束）。"""
+    """按 OTA_DATA_CHUNK(1024B)分包，返回 [(offset, chunk)]。offset 恒为
+    1024 倍数（4 字节对齐，满足 boot 侧 Flash_ProgramBytes 的字编程对齐约束）。"""
     if len(bin_) > APP_MAX_SIZE:
         raise ValueError("firmware %d B > APP_MAX_SIZE %d" % (len(bin_), APP_MAX_SIZE))
     chunk = min(OTA_DATA_CHUNK, FRAME_DATA_MAX)

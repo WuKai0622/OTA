@@ -12,15 +12,21 @@ from PySide6.QtCore import QThread, Signal
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import ota_proto as P
 
-# 逐帧确认与重发参数（HC-05 已降到 9600，黑障基本消失；重发只是兜底）
-START_TIMEOUT = 3.0   # START 应答：含 A 区整擦时间(~几百 ms)
+# 逐帧确认与重发参数
+# ★ START_TIMEOUT 必须是 8s：F407 的最小擦除单位是扇区（最小 128KB），收到 OTA_START
+#   后 boot 要先把整个下载区擦掉才会回 ACK。即使只传几十 KB 的固件，也要擦掉一整块
+#   128KB 扇区 —— 典型 1s、最坏 4s，且擦除期间 Flash 总线 stall、CPU 冻结。
+#   F103 时代的 3.0s 会把这段正常擦除误判成"无应答"而重发，重发又触发一次全擦，
+#   来回几次都成功不了。
+START_TIMEOUT = 8.0
 START_RETRY   = 3
-DATA_TIMEOUT  = 3.0   # 单帧等 ACK(9600 下 512B 帧上串口约 0.55s，3s 足够宽裕)
+DATA_TIMEOUT  = 3.0   # 单帧等 ACK。UART@115200 下 1036B 帧约 90ms；ETH 下是瞬时的
 DATA_RETRY    = 10
-# 偶发 RF 卡顿：一次超时≈链路正在卡，先静默较久再探，别 0.5s 连撞浪费。
-# 下标=第几次失败后的静默秒数；只走错误路径，几乎不影响干净路径速度。
-RETRY_QUIET  = [4.0, 5.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
-INTER_FRAME_GAP = 0.02  # 帧间最小停顿：9600 干净链路下几乎不耗时，仅防极端背靠背
+# 超时后的静默退避，下标=第几次失败后的静默秒数（只走错误路径）。
+# ★ 原值 [4,5,8,8...] 是给 HC-05 弱链路留 RF 恢复时间的；现在走有线 UART / ETH，
+#   偶发一次超时基本都是瞬时拥塞，退避 4~8s 纯属浪费（ETH 上 TCP 自己还会重传）。
+RETRY_QUIET  = [0.5, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+INTER_FRAME_GAP = 0.02  # 帧间最小停顿：防极端背靠背，几乎不耗时
 END_TIMEOUT   = 3.0
 END_RETRY     = 3
 
@@ -31,13 +37,11 @@ class OtaWorker(QThread):
     progress = Signal(int, int, str)  # (已发帧, 总帧数, 状态文本)
     done = Signal(bool, str)          # (成功?, 摘要)
 
-    def __init__(self, transport, bin_path: str, target: int = 0,
-                 delay_per_frame: float = 0.1, parent=None):
+    def __init__(self, transport, bin_path: str, target: int = 0, parent=None):
         super().__init__(parent)
         self._transport = transport
         self._bin_path = bin_path
         self._target = target
-        self._delay = delay_per_frame
         self._stop = False
 
     def stop(self):

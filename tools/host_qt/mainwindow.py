@@ -24,8 +24,14 @@ class MainWindow(QMainWindow):
         # ---------- 通道选项卡 ----------
         self.tabs = QTabWidget()
         self.serial_tab = SerialTab()
-        self.eth_tab = NetTab("ETH (lwip/tcp)", "eth_host", "eth_port")
-        self.wifi_tab = NetTab("wifi 模组 (SPI+OTA)", "wifi_host", "wifi_port")
+        self.eth_tab = NetTab(
+            "192.168.1.2", "5001",
+            "boot 侧 lwip 静态 IP 192.168.1.2/24，TCP 服务器端口 5001（见 ota_net.h）。\n"
+            "PC 作为 client 主动连接；设备单连接模型，新连接会顶掉旧连接。")
+        self.wifi_tab = NetTab(
+            "192.168.1.50", "5001",
+            "wifi 模组透传：目标是模组被分配到的 IP。\n"
+            "模组内的透传目标需自行配好（模组固件/AT 指令），设备侧仍是同一个 boot 帧协议。")
         self.tabs.addTab(self.serial_tab, "UART 串口")
         self.tabs.addTab(self.eth_tab, "ETH 网口")
         self.tabs.addTab(self.wifi_tab, "wifi 模组")
@@ -86,9 +92,13 @@ class MainWindow(QMainWindow):
         self.log_view.clear()
 
     def _browse(self):
-        default = os.path.normpath(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "MDK-ARM", "SLOTA.bin"))
+        """默认指向当前目标平台(F407 / OTA_ETH)的构建产物；不存在则回落到 F103 老工程。"""
+        proj = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        cands = [
+            os.path.join(os.path.dirname(proj), "OTA_ETH", "MDK-ARM", "SLOTA_ETH.bin"),
+            os.path.join(proj, "MDK-ARM", "SLOTA.bin"),
+        ]
+        default = next((p for p in cands if os.path.exists(p)), cands[0])
         path, _ = QFileDialog.getOpenFileName(self, "选择固件", default, "固件 (*.bin)")
         if path:
             self.fw_path.setText(path)
@@ -105,10 +115,10 @@ class MainWindow(QMainWindow):
             return SerialTransport(port, baud)
         elif idx == 1:
             cfg = self.eth_tab.current_config()
-            return TcpTransport(*cfg)
+            return TcpTransport(*cfg, label="ETH")
         else:
             cfg = self.wifi_tab.current_config()
-            return TcpTransport(*cfg)
+            return TcpTransport(*cfg, label="wifi")
 
     def _start(self):
         if self._worker and self._worker.isRunning():
@@ -168,7 +178,8 @@ class SerialTab(QWidget):
         lay.addWidget(QLabel("波特率:"), 1, 0)
         self.baud = QLineEdit("115200")
         lay.addWidget(self.baud, 1, 1)
-        note = QLabel("说明：当前 boot 侧帧协议走此 UART 通道（115200 8N1）。")
+        note = QLabel("说明：boot 的串口通道是 USART3（帧协议与 ETH 通道共用同一个接收环）。\n"
+                      "有线直连时 115200 即可；若这一头挂的是蓝牙透传模组，需降到 9600~19200。")
         note.setStyleSheet("color:#888;")
         lay.addWidget(note, 2, 0, 1, 3)
         self.setLayout(lay)
@@ -193,27 +204,26 @@ class SerialTab(QWidget):
 
 
 class NetTab(QWidget):
-    """ETH 与 wifi 模组共用：目标是某 IP:port 的 TCP 服务器（boot 侧后续挂网口）。"""
-    def __init__(self, title: str, host_key: str, port_key: str):
+    """ETH 与 wifi 模组共用：目标是某 IP:port 的 TCP 服务器，PC 作为 client 主动连。"""
+    def __init__(self, default_host: str, default_port: str, note: str):
         super().__init__()
-        self.title = title
         lay = QGridLayout()
         lay.addWidget(QLabel("目标 IP:"), 0, 0)
-        self.host = QLineEdit("192.168.1.10")
+        self.host = QLineEdit(default_host)
         lay.addWidget(self.host, 0, 1)
         lay.addWidget(QLabel("端口:"), 1, 0)
-        self.port = QLineEdit("8080")
+        self.port = QLineEdit(default_port)
         lay.addWidget(self.port, 1, 1)
-        note = QLabel("本通道传输层已就绪（TCP client，复用同帧协议）。\n"
-                      "boot 侧 ETH(lwip) / wifi(SPI) 驱动接入后可直接使用。")
-        note.setStyleSheet("color:#888;")
-        lay.addWidget(note, 2, 0, 1, 2)
+        lbl = QLabel(note)
+        lbl.setStyleSheet("color:#888;")
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl, 2, 0, 1, 2)
         self.setLayout(lay)
 
     def current_config(self):
-        host = self.host.text().strip() or "127.0.0.1"
+        host = self.host.text().strip() or "192.168.1.2"
         try:
-            port = int(self.port.text().strip() or "8080")
+            port = int(self.port.text().strip() or "5001")
         except ValueError:
-            port = 8080
+            port = 5001
         return host, port
