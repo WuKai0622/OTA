@@ -1,8 +1,8 @@
 # 上位机与联调工具
 
-对应帧协议方案 [OTA帧协议设计方案.md](../docs/OTA帧协议设计方案.md)。帧格式：`包头2 + 命令2 + 长度2 + 数据N + 保留4 + CRC16(2)`，CRC16-MODBUS 覆盖 `[命令..保留]`。
+帧格式：`包头2 + 命令2 + 长度2 + 数据N + 保留4 + CRC16(2)`，CRC16-MODBUS 覆盖 `[命令..保留]`。协议定义的权威来源是 [`../Core/Inc/protocol.h`](../Core/Inc/protocol.h)，项目总览见 [`../README.md`](../README.md)。
 
-当前目标平台为 **F407ZGT6**（工程 `../OTA_ETH`）：boot 侧同时挂了 **UART(USART3)** 与 **ETH(lwip/TCP 服务器)** 两条通道，两条通道的字节流汇入同一个接收环，帧协议只有一份。
+当前目标平台为 **F407ZGT6**（本仓库根目录即该工程）：boot 侧同时挂了 **UART(USART3)** 与 **ETH(lwip/TCP 服务器)** 两条通道，两条通道的字节流汇入同一个接收环，帧协议只有一份。
 
 ## 文件
 
@@ -58,4 +58,4 @@ boot 采用 **stop-and-wait 逐帧确认**：丢帧/坏帧由单帧重发兜住�
 ## 两个必须知道的超时约束
 
 - **`START_TIMEOUT = 8.0s`**（`ota_host.py` 与 `host_qt/ota_worker.py` 各一处）。F407 的最小擦除单位是**扇区**（最小 128KB），收到 OTA_START 后 boot 要先把整个下载区擦掉才会回 ACK —— 即使只传几十 KB 的固件也要擦掉一整块扇区，典型 1s、最坏 4s，且擦除期间 Flash 总线 stall、CPU 冻结。**不要改回 3s**：那会把正常擦除误判成无应答而重发，重发又触发一次全擦。
-- **`OTA_DATA_CHUNK = 1024`** 对应 boot 侧 `TCP_MSS` 需为 `1460`（`../OTA_ETH/LWIP/Target/lwipopts.h`）。帧总长 1036B 加 TCP/IP 头约 40B 仍小于 MTU 1500，不会被 IP 分片；若 `TCP_MSS` 留在默认的 536，每个应用帧会被拆成 2 个 TCP 段。
+- **`OTA_DATA_CHUNK = 1024`** 对应帧总长 1036B，boot 侧 `TCP_MSS` 必须 **≥ 1036** 才能保证一帧装进单个 TCP 段。当前 [`../LWIP/Target/lwipopts.h`](../LWIP/Target/lwipopts.h) 中为 **`1426`**；若留在默认的 536，每个应用帧会被拆成 2 个 TCP 段。
