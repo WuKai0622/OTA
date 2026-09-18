@@ -116,15 +116,28 @@ DATA_RETRY    = 10
 # ★ 原值 [4,5,8,8...] 是给 HC-05 弱链路留 RF 恢复时间的；现在走有线 UART / ETH，
 #   偶发一次超时基本都是瞬时拥塞，退避 4~8s 纯属浪费（ETH 上 TCP 自己还会重传）。
 RETRY_QUIET  = [0.5, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
-INTER_FRAME_GAP = 0.02  # 帧间最小停顿：防极端背靠背，几乎不耗时
+# 帧间停顿：原为 0.02s（防极端背靠背）。实测它吃掉以太网通道约 29% 的传输时间 ——
+#   1024B/帧时，0.02s 单独就把上限锁死在约 410 kbps，而 TCP 自身已有 Nagle 与拥塞
+#   控制兜底，故改为 0。调用处用 >0 判断，跳过 sleep 系统调用本身。
+#   ★ 若在弱链路上出现丢帧/超时，可调回 0.002 ~ 0.02 之间。
+INTER_FRAME_GAP = 0.0
 END_TIMEOUT   = 3.0
 END_RETRY     = 3
+
+# 最近一次 run_ota() 的分段耗时（秒），供 main() 打印。
+# ★ 为什么必须拆开:boot 收到 OTA_START 后要先把整个下载区擦掉才回 ACK,而这是【固定成本】
+#   ——F407 单 bank,最小擦除单位就是 128KB 扇区(典型 1s、最坏 4s),与固件大小完全无关。
+#   固件越小,它占总耗时比例越高,于是"用总耗时算出来的 kbps"会随固件大小剧烈漂移
+#   (同一块板子:传 26KB 时约 168 kbps,传 79KB 时约 497 kbps),那不是链路能力。
+LAST_TIMING = {}   # {"erase": 秒, "data": 秒}
 
 
 def run_ota(link, fw: bytes, inject_err: bool):
     """执行一次完整升级流程（逐帧确认 + 超时重发），返回 (ok, 总帧数, 说明)。"""
     chunks = P.split_firmware(fw)
     total_len = len(fw)
+    LAST_TIMING.clear()
+    t0 = time.time()
     print("[1/4] OTA_START  total=%d B  帧数=%d(每帧 %d B)" % (total_len, len(chunks), P.OTA_DATA_CHUNK))
 
     # START：等 ACK；应答丢失/坏帧则整帧重发
@@ -140,6 +153,8 @@ def run_ota(link, fw: bytes, inject_err: bool):
         print("    START 无应答, 重试 %d/%d（boot 可能正在擦除下载区）" % (attempt, START_RETRY))
     if not start_ok:
         return False, 0, "OTA_START 无应答(重发 %d 次超时)" % START_RETRY
+    # START 的 ACK 到手 = 下载区擦除完毕（另外含发送 START + 一个往返，毫秒级可忽略）
+    LAST_TIMING["erase"] = time.time() - t0
 
     print("[2/4] 开始发送 %d 帧数据(逐帧确认)..." % len(chunks))
     sent = 0
@@ -169,8 +184,10 @@ def run_ota(link, fw: bytes, inject_err: bool):
         if not accepted:
             return False, len(chunks), "第%d帧(off=%d) 重发%d次仍无确认" % (idx + 1, off, DATA_RETRY)
         sent += len(chunk)
-        time.sleep(INTER_FRAME_GAP)
+        if INTER_FRAME_GAP > 0:
+            time.sleep(INTER_FRAME_GAP)
     print("[3/4] 已发送并确认 %d B" % sent)
+    LAST_TIMING["data"] = time.time() - t0 - LAST_TIMING["erase"]
 
     # END：等 ACK 验收（boot 应答后即搬运+跳转）
     for attempt in range(1, END_RETRY + 1):
@@ -249,8 +266,29 @@ def main():
             ack = wait_ack(link, timeout=START_TIMEOUT)
             print("OTA_START 应答:", "RSP_OK" if ack and ack.ok else ("RSP_ERR" if ack else "无应答"))
             return
+        # 耗时统计：计时区间 = 发出 OTA_START 起到收到 END 的 ACK 止，
+        # 因此【包含 boot 擦除下载区】那 1~4s（擦除完成才回 START 的 ACK）。
+        t0 = time.time()
         ok, nframes, msg = run_ota(link, fw, inject_err=args.inject_err)
+        elapsed = time.time() - t0
+
         print("[4/4] 结果: %s  (帧数=%d, 消息=%s)" % ("成功" if ok else "失败", nframes, msg))
+        # ★ 只用 ASCII 前缀，不用 ⏱/⚡：stdout 重定向到文件时编码是 GBK(cp936)，
+        #   那两个符号不在 GBK 里，会直接 UnicodeEncodeError 把整条命令搞崩。
+        er = LAST_TIMING.get("erase")
+        da = LAST_TIMING.get("data")
+        if er is None or da is None:
+            print("      升级耗时: %.2f 秒" % elapsed)
+        else:
+            print("      升级耗时: %.2f 秒  = 擦除下载区 %.2f + 传输 %.2f" % (elapsed, er, da))
+            if da > 0:
+                print("      传输段吞吐: %.1f kbps (%.2f KB/s, 每帧 %.1f ms)"
+                      % (len(fw) * 8.0 / da / 1000.0, len(fw) / da / 1024.0,
+                         da * 1000.0 / max(nframes, 1)))
+        # 含擦除的总吞吐：这才是"用户按下按钮到能跑 app"的实际感受，但会随固件大小漂移
+        if ok and elapsed > 0:
+            print("      含擦除总吞吐: %.1f kbps (%.2f KB/s)"
+                  % (len(fw) * 8.0 / elapsed / 1000.0, len(fw) / elapsed / 1024.0))
         sys.exit(0 if ok else 2)
     finally:
         link.close()

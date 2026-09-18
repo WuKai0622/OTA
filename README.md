@@ -1,10 +1,10 @@
 # STM32F407 以太网 / 蓝牙双通道 IAP 在线固件升级系统
 
-基于 **STM32F407ZGTx + LAN8742A** 的 Bootloader，支持经 **以太网(TCP)** 与 **蓝牙(HC-05 透传)** 两条链路远程升级应用固件 —— **不拆机、可远程、掉电不变砖**。
+基于 **STM32F407ZGTx + LAN8720A** 的 Bootloader，支持经 **以太网(TCP)** 与 **蓝牙(HC-05 透传)** 两条链路远程升级应用固件 —— **不拆机、可远程、掉电不变砖**。
 
 ![platform](https://img.shields.io/badge/MCU-STM32F407ZGTx-blue)
 ![stack](https://img.shields.io/badge/TCP%2FIP-lwIP%202.1.2%20(NO__SYS%3D1)-green)
-![phy](https://img.shields.io/badge/PHY-LAN8742A%20%2B%20RMII-orange)
+![phy](https://img.shields.io/badge/PHY-LAN8720A%20%2B%20RMII-orange)
 ![ide](https://img.shields.io/badge/IDE-Keil%20MDK-red)
 ![host](https://img.shields.io/badge/host-Python%20%2B%20PySide6-yellow)
 
@@ -72,7 +72,7 @@
         └─────┬─────┘
               ▼
      ┌──────────────────┐
-     │  LAN8742A  (PHY) │  差分收发 · 编解码 · 时钟恢复 · 自协商
+     │  LAN8720A  (PHY) │  差分收发 · 编解码 · 时钟恢复 · 自协商
      └────────┬─────────┘
               │  RMII（数字信号：REF_CLK / TXD0,1 / RXD0,1 / TX_EN / CRS_DV）
               ▼
@@ -246,7 +246,7 @@ OTA_ETH/
 │   └── Target/
 │       ├── ethernetif.c            ★ 零拷贝收发、自定义内存池
 │       └── lwipopts.h              lwIP 配置（NO_SYS=1，TCP_MSS=1426）
-├── Drivers/                    ← STM32F4xx HAL + CMSIS + LAN8742 驱动
+├── Drivers/                    ← STM32F4xx HAL + CMSIS + PHY 驱动(lan8742/，见"硬件")
 ├── Middlewares/                ← lwIP 2.1.2 源码
 ├── MDK-ARM/                    ← Keil MDK 工程（编译产物已 gitignore）
 ├── tools/                      ← 上位机工具（见 tools/README.md）
@@ -265,7 +265,9 @@ OTA_ETH/
 ### 硬件
 
 - STM32F407ZGTx（1MB Flash）
-- LAN8742A PHY，**RMII** 接口
+- LAN8720A PHY，**RMII** 接口
+  > 注：CubeMX 生成的 PHY 驱动目录叫 `Drivers/BSP/Components/lan8742/`，那是 ST 模板的默认命名
+  > （取自 ST 自家评估板），**不代表实际芯片型号**。LAN8720A 与 LAN8742A 寄存器兼容，同一份驱动通用。
 - 可选：HC-05 蓝牙模块接 USART3
 - 可选：FSMC 并口 LCD 用于显示进度
 
@@ -440,7 +442,7 @@ __set_PRIMASK(primask);
 | 类别 | 选型 |
 |---|---|
 | **MCU** | STM32F407ZGTx（Cortex-M4，168MHz） |
-| **PHY** | LAN8742A，RMII 接口 |
+| **PHY** | LAN8720A，RMII 接口 |
 | **TCP/IP** | lwIP 2.1.2，**`NO_SYS=1`** 裸机模式（无 RTOS，主循环轮询） |
 | **lwIP 配置** | `LWIP_NETCONN=0`、`LWIP_SOCKET=0`（仅用 raw/callback API）、`TCP_MSS=1426` |
 | **无线通道** | HC-05 蓝牙 SPP 透传，UART 19200 8N1 |

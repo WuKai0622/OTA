@@ -26,7 +26,11 @@ DATA_RETRY    = 10
 # ★ 原值 [4,5,8,8...] 是给 HC-05 弱链路留 RF 恢复时间的；现在走有线 UART / ETH，
 #   偶发一次超时基本都是瞬时拥塞，退避 4~8s 纯属浪费（ETH 上 TCP 自己还会重传）。
 RETRY_QUIET  = [0.5, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
-INTER_FRAME_GAP = 0.02  # 帧间最小停顿：防极端背靠背，几乎不耗时
+# 帧间停顿：原为 0.02s（防极端背靠背）。实测它吃掉以太网通道约 29% 的传输时间 ——
+#   1024B/帧时，0.02s 单独就把上限锁死在约 410 kbps，而 TCP 自身已有 Nagle 与拥塞
+#   控制兜底，故改为 0。调用处用 >0 判断，跳过 sleep 系统调用本身。
+#   ★ 若在弱链路上出现丢帧/超时，可调回 0.002 ~ 0.02 之间。
+INTER_FRAME_GAP = 0.0
 END_TIMEOUT   = 3.0
 END_RETRY     = 3
 
@@ -99,6 +103,10 @@ class OtaWorker(QThread):
         total = len(chunks)
         self.log.emit("固件 %d B，分包 %d 帧(每帧 %d B，逐帧确认)" % (len(fw), total, P.OTA_DATA_CHUNK))
 
+        # 计时起点：发出 OTA_START 之前。区间覆盖到收到 END 的 ACK 为止，
+        # 所以【包含 boot 擦除下载区】的 1~4s（擦除完成才会回 START 的 ACK）。
+        t0 = time.time()
+
         # 1) START：等 ACK OK（应答丢失则整帧重发）
         self._transport.flush_rx()
         start_ok = False
@@ -121,6 +129,8 @@ class OtaWorker(QThread):
             self._transport.close(); self.err.emit("OTA_START 无应答(重发 %d 次超时)" % START_RETRY)
             self.done.emit(False, "START 超时")
             return
+        # START 的 ACK 到手 = 下载区擦除完毕（另外含发送 START + 一个往返，毫秒级可忽略）
+        erase_s = time.time() - t0
         self.log.emit("OTA_START ACK=OK")
 
         # 2) DATA：逐帧发，等该偏移 ACK OK；超时/NACK 重发本帧
@@ -152,11 +162,12 @@ class OtaWorker(QThread):
                 self.done.emit(False, "验收失败")
                 return
             sent += len(chunk)
-            if not self._stop:
+            if not self._stop and INTER_FRAME_GAP > 0:
                 time.sleep(INTER_FRAME_GAP)
             self.progress.emit(i + 1, total, "已发 %d/%d 帧 (%d B)" % (i + 1, total, sent))
 
         self.log.emit("数据帧已全部确认 (%d B)" % sent)
+        data_s = time.time() - t0 - erase_s
 
         # 3) END：等最终 ACK 验收（boot 应答后即搬运+跳转）
         end_ok = False
@@ -175,13 +186,25 @@ class OtaWorker(QThread):
                     return
                 break
             self.err.emit("OTA_END 无应答，重试 %d/%d" % (attempt, END_RETRY))
+        elapsed = time.time() - t0
         self._transport.close()
         if self._stop:
             self.done.emit(False, "用户中止")
             return
         if end_ok:
+            # 吞吐按固件净字节算，不含帧头/ACK 开销，故低于链路波特率属正常。
+            # ★ 擦除段是固定成本（F407 单 bank，最小擦除单位 128KB 扇区，与固件大小无关），
+            #   所以"含擦除的总吞吐"会随固件变小而暴跌。要衡量链路能力看【传输段】那个数。
+            kbps = len(fw) * 8.0 / elapsed / 1000.0 if elapsed > 0 else 0.0
+            kbs = len(fw) / elapsed / 1024.0 if elapsed > 0 else 0.0
+            dkbps = len(fw) * 8.0 / data_s / 1000.0 if data_s > 0 else 0.0
+            ms_per = data_s * 1000.0 / total if total else 0.0
             self.log.emit("OTA_END ACK=OK，升级验收通过！")
-            self.done.emit(True, "升级成功")
+            self.log.emit("分段: 擦除下载区 %.2f s | 传输 %.2f s -> 传输段 %.1f kbps (每帧 %.1f ms)"
+                          % (erase_s, data_s, dkbps, ms_per))
+            self.log.emit("升级耗时 %.2f 秒，含擦除总吞吐 %.1f kbps (%.2f KB/s)" % (elapsed, kbps, kbs))
+            self.done.emit(True, "升级成功 —— 耗时 %.2f 秒（擦除 %.2f + 传输 %.2f），"
+                                 "传输段 %.1f kbps" % (elapsed, erase_s, data_s, dkbps))
         else:
             self.err.emit("OTA_END 应答丢失（若已跳转运行 app 属正常，否则请整包重发）")
             self.done.emit(False, "END 超时")
