@@ -1,0 +1,53 @@
+# ============================================================
+# Keil MDK 编译产物 —— 全部由源码重新生成，不入库
+# ============================================================
+# 中间对象/可执行文件目录（本项目约 211MB，是仓库体积的唯一大头）
+MDK-ARM/OTA_ETH/
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+
+# 编译输出
+MDK-ARM/*.bin
+MDK-ARM/*.hex
+MDK-ARM/*.axf
+MDK-ARM/*.elf
+MDK-ARM/*.map
+
+# 列表/依赖/日志
+MDK-ARM/*.lst
+MDK-ARM/*.dep
+MDK-ARM/*.lnp
+MDK-ARM/*.htm
+MDK-ARM/*.build_log.htm
+MDK-ARM/*.iex
+MDK-ARM/*.sct
+MDK-ARM/JLinkLog.txt
+MDK-ARM/*.scvd.bak
+
+# Keil GUI 布局文件（形如 xxx.uvguix.<Windows用户名>，纯个人化设置）
+MDK-ARM/*.uvguix.*
+
+# ============================================================
+# Python（上位机工具）
+# ============================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ============================================================
+# 编辑器 / 操作系统
+# ============================================================
+.vscode/
+.idea/
+# 本机 Claude Code 设置（只含个人权限配置）。若以后想公开项目级 CLAUDE.md，
+# 需在这里加一行 !CLAUDE.md 把它排除在外。
+.claude/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store

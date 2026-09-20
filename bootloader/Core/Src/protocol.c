@@ -65,6 +65,22 @@ static uint32_t      g_ota_rx_total;       /* 已写下载区累计字节 */
 static uint8_t       g_ota_active;         /* 1=已进入下载会话(收到合法 OTA_START) */
 static Proto_Tx_t    g_tx = 0;             /* 发送出口（由 Proto_SetTx 注入） */
 
+/* ---- 会话绑定（见 protocol.h 顶部那段说明）----
+ * g_cur_ch  : 最后一次收到数据的通道。没有锁存时的兜底选择。
+ * g_sess_chan: 本次升级会话**锁存**的通道，收到 OTA_START 时置位，之后不再变。
+ *             应答一律回它 —— 与"发送时刻哪条通道连着"无关。
+ * 两者都是 OTA_CH_NONE 时（从未收到过任何字节）出口回落串口，
+ * 与加 SPI 通道之前的行为一致（那时是"TCP 没连接就走串口"）。 */
+static OtaChan_t     g_cur_ch = OTA_CH_NONE;
+static OtaChan_t     g_sess_chan = OTA_CH_NONE;
+
+/* 本次会话该往哪条通道发。
+ * ★ 只此一处做通道选择 —— 出口（BootTxEx）、三条通道驱动都不再判断"谁连着"。 */
+static OtaChan_t TxChan(void)
+{
+    return (g_sess_chan != OTA_CH_NONE) ? g_sess_chan : g_cur_ch;
+}
+
 /* 已写下载区字节数（供 LCD 显示，Bootloader.c 同量） */
 extern uint32_t g_dl_off;
 
@@ -78,6 +94,13 @@ void Proto_Init(void)
     g_frm_len = 0;
     g_frm_data_len = 0;
     g_ota_active = 0u;   /* 每次上电复位会话标志：等待窗口据它判断是否进入下载 */
+
+    /* ★ 通道也必须一起复位。上电时 g_sess_chan 靠静态零初始化本来就是 NONE，
+     *   但这里显式写一遍：将来若有人在运行期调用 Proto_Init()（比如"放弃本次
+     *   升级、重开一个会话"），漏掉这一行就会把上一次锁存的通道沿用下去 ——
+     *   表现是"新会话的 ACK 发去了上一条通道"，与本次要修的 bug 一模一样。 */
+    g_cur_ch    = OTA_CH_NONE;
+    g_sess_chan = OTA_CH_NONE;
 }
 
 void Proto_SetTx(Proto_Tx_t tx)
@@ -99,6 +122,14 @@ static void Proto_HandleFrame(void)
 
     if (cmd == CMD_OTA_START)
     {
+        /* ★★ 会话绑定就在这里锁存，**在合法性校验之前**。
+         *   为什么要提前到校验之前：START 被拒时也要回 ACK_ERR，而那条 ERR
+         *   同样必须回**发起方所在的那条通道**。放在校验之后的话，一个"被拒的
+         *   START"会用上一次会话锁存的通道回 ERR，PC 在本次通道上白等。
+         *   安全性不靠"只在合法时锁存"来保证 —— 能走到这里的帧 CRC 已经过了，
+         *   而 CRC 是在 ST_WAIT_CRC 里校验通过才调用本函数的。 */
+        g_sess_chan = g_cur_ch;
+
         /* 数据区 4B = 固件总长 L */
         len32 = (uint32_t)data[0] | ((uint32_t)data[1] << 8)
               | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
@@ -186,7 +217,11 @@ static void Proto_HandleFrame(void)
 
 /* 发送应答帧：HEAD + CMD_ACK + LEN=1 + code + RSV(4B 小端) + CRC（覆盖 CMD..RSV）
  * RSV 携带被确认的偏移：DATA 帧应答用它告诉上位机"本偏移已写入/需重发"，
- * START/END 应答 RSV=0。上位机靠 RSV 做逐帧确认/幂等重发。 */
+ * START/END 应答 RSV=0。上位机靠 RSV 做逐帧确认/幂等重发。
+ *
+ * ★ 通道由 TxChan() 统一算出（会话已锁存则用锁存值），出口只负责照着发。
+ *   "选哪条通道"这个决策必须只有一处 —— 散到出口函数里就会变成三处，
+ *   而三处里任意一处判错都是"ACK 发去了别的通道"这种偶发且难查的故障。 */
 static void SendAckEx(uint8_t code, uint32_t rsv)
 {
     uint8_t buf[13];
@@ -209,7 +244,7 @@ static void SendAckEx(uint8_t code, uint32_t rsv)
 
     if (g_tx != 0)
     {
-        (void)g_tx(buf, 13u);             /* 失败不重发：由上位机超时重发兜底 */
+        (void)g_tx(TxChan(), buf, 13u);   /* 失败不重发：由上位机超时重发兜底 */
     }
 }
 
@@ -224,10 +259,23 @@ uint8_t Proto_SessionStarted(void)
     return g_ota_active;
 }
 
-/* 喂入字节流，驱动状态机；收满一帧后校验并分发 */
-void Proto_Feed(const uint8_t *p, uint16_t len)
+/* 喂入字节流，驱动状态机；收满一帧后校验并分发。
+ * ch = 这段字节来自哪条通道（由 producer 决定，见 protocol.h）。 */
+void Proto_Feed(const uint8_t *p, uint16_t len, OtaChan_t ch)
 {
     uint16_t i;
+
+    /* ★ 在循环**之前**记下来源，而不是在 Proto_HandleFrame 里现取：
+     *   Proto_HandleFrame 是由**收满整帧那一次**调用触发的，而那一次不一定就是
+     *   第一段 —— 一帧可能被拆在多次 Proto_Feed 里到达（SPI 每笔事务只有 256B，
+     *   一个 1036B 的 DATA 帧要 5 笔才凑齐）。在循环前记下，当下这一段的来源就
+     *   是确定的。
+     *
+     * ★ 注意由此得到的语义是"**以收满整帧的那一段为准**"，不是"以第一段为准"。
+     *   同一帧的各段来自同一条通道时两者等价（正常情况都是这样），
+     *   真的混了通道才会显出差别 —— 那已经是 boot 侧 g_ring_src 那个
+     *   单通道前提被破坏的信号了，见 Bootloader.c 的"已知假设"。 */
+    g_cur_ch = ch;
 
     for (i = 0; i < len; i++)
     {

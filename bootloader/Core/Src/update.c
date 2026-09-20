@@ -2,6 +2,7 @@
 #include "flash_if.h"
 #include "flags.h"
 #include "ota_net.h"
+#include "ota_spi.h"
 #include "stm32f4xx_hal.h"
 
 /* 分块搬运缓冲（RAM）：一次搬一块再写，避免整区大数组占用 RAM。
@@ -93,6 +94,18 @@ static void Upd_JumpToApp(uint32_t addr)
     uint32_t i;
 
     OTA_Net_DeInit();                      /* ★ 必须在关中断之前：内部要动 lwIP 和 ETH DMA */
+
+    /* ★ 拆 SPI 之前把发送队清空 —— 这是队列被销毁前的最后一道。
+     *   （正常路径上队在 Upd_OnDownloadComplete 开头就已经排空了，所以这里是
+     *     零开销的兜底；留着是因为"跳转"是本队列唯一的销毁点，
+     *     将来任何在跳转前入队的应答都得靠它。）
+     *   ★ 这里的预算同样用 OTA_SPI_FLUSH_MS：这是 ACK 的**最后一次机会** ——
+     *     下面一句就把队列销毁了，而跳转之后上位机重发的 END 再也没人应答。 */
+    OTA_Spi_FlushTx(OTA_SPI_FLUSH_MS);
+
+    OTA_Spi_DeInit();                      /* ★ 同理：不能让 SPI2 带着已使能状态交给 app。
+                                            *   app 会重新 MX_SPI2_Init()，两套配置打架的结果
+                                            *   是"偶发、且看起来跟 OTA 毫无关系"的故障。 */
     __disable_irq();                       /* 关全局中断 */
     for (i = 0u; i < 8u; i++)
     {
@@ -256,6 +269,26 @@ void Upd_StartupLaunch(void)
 void Upd_OnDownloadComplete(uint32_t total_len)
 {
     s_flags f;
+
+    /* ★★ 第一件事：把 OTA_END 的应答**推上总线**，然后再开始擦写。
+     *
+     *   调用方（protocol.c 的 CMD_OTA_END 分支）刚刚才把 ACK 交给发送层，而
+     *   SPI 的发送层是个**队列**——入队 ≠ 发出去，要等主循环再跑一次事务才会
+     *   真的上总线。而本函数下面做的是擦扇区 + 拷 128KB，是**秒级**的阻塞操作，
+     *   主循环全程回不来。上位机那头 END_TIMEOUT = 3.0 秒，等不到就重发、
+     *   重试耗尽后报"升级失败"——可固件其实已经写好了。
+     *
+     *   ETH 通道没有这个问题（lwIP 的发送由 ETH DMA 独立完成，与我们卡不卡在
+     *   擦除里无关）；UART 是阻塞发送、发完才返回。只有队列式的 SPI 会把
+     *   "入队成功"当成"已发出"。
+     *
+     *   队列空时本调用零开销，所以这里无条件执行，不做通道判断——
+     *   在 update.c 里区分通道是错的分层，它只该知道"发完了再干活"。
+     *
+     *   ★ 预算给到 OTA_SPI_FLUSH_MS（2000ms）而不是几十毫秒：一次 HAL 超时就
+     *     要 100ms，预算比它小的话**一次抖动就能让这根 ACK 永远发不出去**。
+     *     详见 ota_spi.h 里 OTA_SPI_FLUSH_MS 那段的算式。 */
+    OTA_Spi_FlushTx(OTA_SPI_FLUSH_MS);
 
     if (total_len == 0u || total_len > APP_MAX_SIZE)
     {

@@ -3,12 +3,15 @@
 
 #include <stdint.h>
 
+#include "ota_chan.h"    /* OTA_RxSink_t —— 三条通道共用的接收汇点类型，见那里 */
+
 /* ==================== OTA 以太网通道（TCP 服务器） ====================
  * 角色：设备做 TCP 服务器，由上位机主动连接。
  *       端口见 OTA_TCP_PORT，本机 IP 在 lwip.c 的 MX_LWIP_Init() 里配置。
  *
  * 职责只有两件事：
- *   ① 接收 —— 把网口收到的字节经"接收汇点"交给上层（boot 侧即写入 4KB 环）
+ *   ① 接收 —— 把网口收到的字节经"接收汇点"交给上层（boot 侧即写入 8KB 环，
+ *              `Bootloader.c` 的 `RING_SIZE = 8192u`）
  *   ② 发送 —— 提供 OTA_Net_Send()，通过 Proto_SetTx() 注册给协议层
  *
  * 本文件不依赖 lwIP 类型，故可脱离 boot 单独编译验证。
@@ -17,19 +20,13 @@
 /* OTA 服务端口（上位机 GUI 里填这个） */
 #define OTA_TCP_PORT        5001
 
-/* 接收汇点：网口收到的每段数据交给它处理。
- *   参数 data/len —— 本段数据
- *   返回          —— 实际被接收的字节数（≤ len）
+/* 接收汇点类型 OTA_RxSink_t 现在住在 ota_chan.h（三条通道共用一份定义）。
  *
  * 返回值的意义（重要）：只把"真正被接收"的字节回报给 TCP 做 tcp_recved，
  * 环满时窗口自然不放大 → 对端自动降速。这是 TCP 通道的背压机制，
  * 也是它不能像串口那样"静默丢弃"的原因（TCP 认为已送达，不会重发）。
  *
- * 实现参考：
- *   boot 侧   → Bootloader_RingWrite（写进环形缓冲，返回实际写入量）
- *   验证阶段  → 只统计字节数 / 打印 / 显示到屏
- */
-typedef uint16_t (*OTA_RxSink_t)(const uint8_t *data, uint16_t len);
+ * boot 侧的实现是 Bootloader.c 里的 EthSink（补上 OTA_CH_ETH 后写进环形缓冲）。 */
 
 /* 初始化并起监听。必须在 MX_LWIP_Init() 之后调用（裸机下即 main 里）。
  * 之后再周期调用 MX_LWIP_Process() 才会真正收包。 */

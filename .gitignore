@@ -1,34 +1,80 @@
 # ============================================================
-# Keil MDK 编译产物 —— 全部由源码重新生成，不入库
+# 本仓库包含三个独立工程，各自有编译产物需要排除：
+#     bootloader/   Keil MDK  工程（F407 引导程序）
+#     app/v1.x/     Keil MDK  工程（F407 应用固件）
+#     esp32/wifi/   ESP-IDF   工程（ESP32-C3 SPI↔TCP 桥）
+# 体积大头是三份编译产物（约 290MB），全部可由源码重新生成，不入库。
+# ============================================================
+
+# ============================================================
+# Keil MDK —— bootloader
 # ============================================================
 # 中间对象/可执行文件目录（本项目约 211MB，是仓库体积的唯一大头）
-MDK-ARM/OTA_ETH/
-MDK-ARM/Objects/
-MDK-ARM/Listings/
+bootloader/MDK-ARM/OTA_ETH/
+bootloader/MDK-ARM/Objects/
+bootloader/MDK-ARM/Listings/
 
 # 编译输出
-MDK-ARM/*.bin
-MDK-ARM/*.hex
-MDK-ARM/*.axf
-MDK-ARM/*.elf
-MDK-ARM/*.map
+bootloader/MDK-ARM/*.bin
+bootloader/MDK-ARM/*.hex
+bootloader/MDK-ARM/*.axf
+bootloader/MDK-ARM/*.elf
+bootloader/MDK-ARM/*.map
 
 # 列表/依赖/日志
-MDK-ARM/*.lst
-MDK-ARM/*.dep
-MDK-ARM/*.lnp
-MDK-ARM/*.htm
-MDK-ARM/*.build_log.htm
-MDK-ARM/*.iex
-MDK-ARM/*.sct
-MDK-ARM/JLinkLog.txt
-MDK-ARM/*.scvd.bak
+bootloader/MDK-ARM/*.lst
+bootloader/MDK-ARM/*.dep
+bootloader/MDK-ARM/*.lnp
+bootloader/MDK-ARM/*.htm
+bootloader/MDK-ARM/*.build_log.htm
+bootloader/MDK-ARM/*.iex
+bootloader/MDK-ARM/*.sct
+bootloader/MDK-ARM/JLinkLog.txt
+bootloader/MDK-ARM/*.scvd.bak
 
 # Keil GUI 布局文件（形如 xxx.uvguix.<Windows用户名>，纯个人化设置）
-MDK-ARM/*.uvguix.*
+bootloader/MDK-ARM/*.uvguix.*
 
 # ============================================================
-# Python（上位机工具）
+# Keil MDK —— app/v1.x（两份结构相同，用通配符覆盖）
+# ============================================================
+# 中间对象/可执行文件目录（每份约 54MB）
+app/*/MDK-ARM/OTA_test_F407/
+
+# 编译输出（注意 startup_stm32f407xx.s 是源码，不能误伤）
+app/*/MDK-ARM/*.bin
+app/*/MDK-ARM/*.hex
+app/*/MDK-ARM/*.axf
+app/*/MDK-ARM/*.elf
+app/*/MDK-ARM/*.map
+
+# 列表/依赖/日志
+app/*/MDK-ARM/*.lst
+app/*/MDK-ARM/*.dep
+app/*/MDK-ARM/*.lnp
+app/*/MDK-ARM/*.htm
+app/*/MDK-ARM/*.build_log.htm
+app/*/MDK-ARM/*.iex
+app/*/MDK-ARM/*.sct
+app/*/MDK-ARM/JLinkLog.txt
+
+# 调试器配置（含本机路径）
+app/*/MDK-ARM/DebugConfig/
+
+# Keil GUI 布局文件（纯个人化设置）
+app/*/MDK-ARM/*.uvguix.*
+
+# ============================================================
+# ESP32-C3（esp32/wifi/ 下另有一份 ESP-IDF 官方模板 .gitignore，
+#             两者叠加生效；这里只补全跨平台通用部分）
+# ============================================================
+esp32/wifi/build/
+esp32/wifi/managed_components/
+esp32/wifi/sdkconfig.old
+esp32/wifi/dependencies.lock
+
+# ============================================================
+# Python（上位机工具 bootloader/tools/）
 # ============================================================
 __pycache__/
 *.py[cod]
