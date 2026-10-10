@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QMainWindow, QGroupBox,
                                QProgressBar, QFileDialog, QTabWidget, QMessageBox)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import ota_proto as P                     # 令牌校验与 CLI 共用同一套（P.parse_token）
 from host_qt.transport import SerialTransport, TcpTransport
 from host_qt.ota_worker import OtaWorker
 
@@ -29,22 +30,45 @@ class MainWindow(QMainWindow):
             "boot 侧 lwip 静态 IP 192.168.1.2/24，TCP 服务器端口 5001（见 ota_net.h）。\n"
             "PC 作为 client 主动连接；设备单连接模型，新连接会顶掉旧连接。")
         self.wifi_tab = NetTab(
-            "192.168.1.50", "5001",
-            "wifi 模组透传：目标是模组被分配到的 IP。\n"
-            "模组内的透传目标需自行配好（模组固件/AT 指令），设备侧仍是同一个 boot 帧协议。")
+            "192.168.4.1", "5001",
+            "ESP32-C3 默认 AP 模式（见 esp32/wifi/main/wifi_link.h）：自己开热点\n"
+            "OTA_ESP32 / 12345678，IP 固定 192.168.4.1，端口 5001。先把 PC 连上该热点。\n"
+            "改成 STA 模式则没有固定 IP，填模组打印出来的那个地址。")
         self.tabs.addTab(self.serial_tab, "UART 串口")
         self.tabs.addTab(self.eth_tab, "ETH 网口")
         self.tabs.addTab(self.wifi_tab, "wifi 模组")
 
         # ---------- 固件选择 ----------
         fw_box = QGroupBox("固件")
-        fw_lay = QHBoxLayout()
+        fw_lay = QVBoxLayout()
+        fw_row = QHBoxLayout()
         self.fw_path = QLineEdit()
         self.fw_path.setPlaceholderText("选择要升级的 .bin 固件")
         btn_browse = QPushButton("浏览...")
         btn_browse.clicked.connect(self._browse)
-        fw_lay.addWidget(self.fw_path, 1)
-        fw_lay.addWidget(btn_browse)
+        fw_row.addWidget(self.fw_path, 1)
+        fw_row.addWidget(btn_browse)
+
+        # 令牌：与 boot 侧 protocol.h 的 OTA_TOKEN_W0/W1 必须一致，随每帧 OTA_START 发出。
+        # ★ 留空则拒绝开始（不预填默认值）：令牌在操作上要真的成为一个"授权步骤"，
+        #   预填会让它退化成"看都没看就点开始"。校验复用 CLI 的 P.parse_token。
+        tok_row = QHBoxLayout()
+        tok_row.addWidget(QLabel("令牌:"))
+        self.token = QLineEdit()
+        self.token.setPlaceholderText("必填：16 位 hex（= 8 字节），如 0123456789ABCDEF")
+        # ★ 不设 maxLength：令牌当前是 16 位 hex，但"带空格分隔"的写法有 19 个字符，
+        #   卡死上限会把输入**静默截断**成一个长度不足的令牌，报出来的错却是
+        #   "令牌必须是 8 字节"，排查方向直接跑偏。长度校验交给 parse_token。
+        tok_row.addWidget(self.token, 1)
+        tok_note = QLabel("必填 8 字节，按 16 位 hex 填（可带空格）。取值见 boot 侧源码 "
+                          "protocol.h 的 OTA_TOKEN_W0/W1 —— 这里不给示例值。\n"
+                          "留空或不对时设备回 RSP_ERR、不擦除任何扇区。")
+        tok_note.setStyleSheet("color:#888;")
+        tok_note.setWordWrap(True)
+
+        fw_lay.addLayout(fw_row)
+        fw_lay.addLayout(tok_row)
+        fw_lay.addWidget(tok_note)
         fw_box.setLayout(fw_lay)
 
         # ---------- 控制与进度 ----------
@@ -127,6 +151,14 @@ class MainWindow(QMainWindow):
         if not bin_path or not os.path.exists(bin_path):
             QMessageBox.warning(self, "提示", "请先选择存在的固件文件")
             return
+        # 令牌必填：在这里（连通道之前）就校验掉。放这么前是因为"令牌错"和
+        # "链路/固件有问题"在设备侧都只表现为一个 RSP_ERR，越早拦掉越不会误判。
+        try:
+            token = P.parse_token(self.token.text().strip())
+        except ValueError as e:
+            QMessageBox.warning(self, "令牌", "令牌无效：%s" % e)
+            self.token.setFocus()
+            return
         transport = self._make_transport()
         if transport is None:
             return
@@ -135,7 +167,7 @@ class MainWindow(QMainWindow):
         else:
             self.log("通道=%s  %s:%d" % (transport.label, transport.host, transport.port))
 
-        self._worker = OtaWorker(transport, bin_path)
+        self._worker = OtaWorker(transport, bin_path, token)
         self._worker.log.connect(self._log_slot)
         self._worker.err.connect(lambda m: self._log_slot("[错误] " + m))
         self._worker.progress.connect(self._on_progress)

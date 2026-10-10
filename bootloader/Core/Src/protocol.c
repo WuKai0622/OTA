@@ -88,12 +88,28 @@ static void Proto_HandleFrame(void);
 static void SendAckEx(uint8_t code, uint32_t rsv);
 static void SendAck(uint8_t code);
 
+/* ★ 本函数是**整个协议层的复位**（上电时调用；也可在运行期重入，用于
+ *   "放弃当前会话、重开一个"—— 常驻下载循环的空闲超时就靠它拆会话，
+ *   见 Bootloader.c 的 BOOT_DL_IDLE_MS）。因此除了帧状态机与 g_ota_active，
+ *   会话的**全部**状态都必须在这里清掉，绝不能只清一部分 —— 见下方第二段。 */
 void Proto_Init(void)
 {
     g_st = ST_WAIT_HEAD0;
     g_frm_len = 0;
     g_frm_data_len = 0;
     g_ota_active = 0u;   /* 每次上电复位会话标志：等待窗口据它判断是否进入下载 */
+
+    /* ★ 会话计数与进度也必须清。漏掉这三个会让"拆会话"名不副实：
+     *   g_ota_len_expected 残留上一次的长度、g_ota_rx_total 残留 0，于是一条
+     *   off=0 的 DATA 帧就能穿过 CMD_OTA_DATA 分支里的
+     *   `off == g_ota_rx_total` 和 `(off+n) <= g_ota_len_expected` 两道判断，
+     *   在**没有任何会话**的情况下直接 Flash_ProgramBytes() 写下载区 ——
+     *   没有 START、没有擦除，是最危险的一种写。
+     *   （CMD_OTA_DATA 分支另有一道显式的 g_ota_active 门禁做兜底，
+     *     但根因在这里：不清干净，门禁之外的路径照样漏。） */
+    g_ota_len_expected = 0u;
+    g_ota_rx_total     = 0u;
+    g_dl_off           = 0u;   /* LCD 显示量：一并归零，屏上不会残留上次的进度 */
 
     /* ★ 通道也必须一起复位。上电时 g_sess_chan 靠静态零初始化本来就是 NONE，
      *   但这里显式写一遍：将来若有人在运行期调用 Proto_Init()（比如"放弃本次
@@ -119,22 +135,56 @@ static void Proto_HandleFrame(void)
                    | ((uint32_t)g_frm[8 + n] << 16)
                    | ((uint32_t)g_frm[9 + n] << 24);
     uint32_t len32;
+    uint32_t tk_lo;
+    uint32_t tk_hi;
 
     if (cmd == CMD_OTA_START)
     {
-        /* ★★ 会话绑定就在这里锁存，**在合法性校验之前**。
-         *   为什么要提前到校验之前：START 被拒时也要回 ACK_ERR，而那条 ERR
-         *   同样必须回**发起方所在的那条通道**。放在校验之后的话，一个"被拒的
-         *   START"会用上一次会话锁存的通道回 ERR，PC 在本次通道上白等。
-         *   安全性不靠"只在合法时锁存"来保证 —— 能走到这里的帧 CRC 已经过了，
+        /* ★★ 会话绑定就在这里锁存，**在合法性校验之前**，但**只在没有活动会话时**。
+         *
+         * 为什么要在校验之前锁存：START 被拒时也要回 ACK_ERR，而那条 ERR 同样
+         *   必须回**发起方所在的那条通道**。放在校验之后的话，一个"被拒的 START"
+         *   会用上一次会话锁存的旧通道回 ERR，PC 在本次通道上白等。
+         *   （没有活动会话时 TxChan() 本就会回落到 g_cur_ch，而 g_cur_ch 是
+         *     Proto_Feed 刚刚按本帧来源设过的，所以这条 ERR 照样回到发起方。）
+         * 为什么必须加 g_ota_active 这个前提：不加的话，一个**被拒的 START**
+         *   （令牌不对/长度非法/擦除失败）会把**正在进行的**会话的应答通道改掉 ——
+         *   正是本文件反复强调要避免的"ACK 发去了别的通道"。加了令牌之后 START
+         *   多了一种被拒理由，这条路径才变得容易被外部触发。
+         * 安全性不靠"只在合法时锁存"来保证 —— 能走到这里的帧 CRC 已经过了，
          *   而 CRC 是在 ST_WAIT_CRC 里校验通过才调用本函数的。 */
-        g_sess_chan = g_cur_ch;
+        if (g_ota_active == 0u)
+        {
+            g_sess_chan = g_cur_ch;
+        }
 
-        /* 数据区 4B = 固件总长 L */
+        /* ---- ① 数据区必须够长：12B = 固件总长 u32(4B) + 令牌(8B) ----
+         * 老版本上位机只发 4B，走的就是这一条 —— **fail-closed**（拒绝），
+         * 这是正确方向：绝不能因为"少读了 8 字节"就把校验整个跳过。 */
+        if (n < OTA_START_DATA_LEN)
+        {
+            SendAck(RSP_ERR);
+            return;
+        }
+
+        /* ---- ② 令牌校验：放在长度校验和擦除**之前** ----
+         * 令牌不对就一个扇区都不动 —— 这是令牌存在的全部意义。
+         * 按小端 u32 两段比较，与 ota_proto.py 的 struct.pack("<II", ...) 对应。 */
+        tk_lo = (uint32_t)data[4] | ((uint32_t)data[5] << 8)
+              | ((uint32_t)data[6] << 16) | ((uint32_t)data[7] << 24);
+        tk_hi = (uint32_t)data[8] | ((uint32_t)data[9] << 8)
+              | ((uint32_t)data[10] << 16) | ((uint32_t)data[11] << 24);
+        if (tk_lo != OTA_TOKEN_W0 || tk_hi != OTA_TOKEN_W1)
+        {
+            SendAck(RSP_ERR);              /* 令牌不符：拒绝，不建会话、不擦除 */
+            return;
+        }
+
+        /* ---- ③ 固件总长 L ---- */
         len32 = (uint32_t)data[0] | ((uint32_t)data[1] << 8)
               | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
 
-        if (n < 4u || len32 == 0u || len32 > APP_MAX_SIZE)
+        if (len32 == 0u || len32 > APP_MAX_SIZE)
         {
             SendAck(RSP_ERR);              /* 越界/非法长度：拒绝 */
             return;
@@ -142,7 +192,7 @@ static void Proto_HandleFrame(void)
         /* 擦除下载区中固件实际覆盖的全部扇区。
          * ★ F4 的擦除粒度是扇区且最小 128KB —— 即使只有 13KB 固件也要擦一整个
          *   S7（典型 1s、最坏 4s），且擦除期间 Flash 总线 stall、CPU 冻结、lwIP 停摆。
-         *   这段耗时发生在 ACK 之前，上位机的 START_TIMEOUT(默认 3.0s) 必须放宽。 */
+         *   这段耗时发生在 ACK 之前，上位机的 START_TIMEOUT(当前 4.5s) 必须放宽，且它同时受上界约束（见 tools/README.md）。 */
         if (Flash_EraseRegion(APP_DL_ADDR, len32) != 0u)
         {
             SendAck(RSP_ERR);              /* 擦除失败：拒绝本次升级 */
@@ -165,6 +215,20 @@ static void Proto_HandleFrame(void)
 
         if (n == 0u || (off & 1u) != 0u)
         {
+            return;
+        }
+
+        /* ★ 显式门禁：没有活动会话时绝不写 Flash。
+         *   Proto_Init() 已经把 g_ota_len_expected/g_ota_rx_total 清 0，
+         *   所以这一条在当前代码下走不到 —— 它是一道**兜底**护栏，把
+         *   "写 Flash 必须先有会话"这个不变量写在写操作旁边，
+         *   而不是依赖两个计数器的初值恰好让下面两判断不成立。
+         *   ★ 必须放在上面那两行对齐检查**之后**：一是 off 要先赋值，
+         *     二是现在空帧/半字错对齐是**静默丢弃**（靠上位机超时重发），
+         *     门禁提到前面会把这种"无法判定"变成一次 ERR 应答。 */
+        if (g_ota_active == 0u)
+        {
+            SendAckEx(RSP_ERR, off);
             return;
         }
 
@@ -202,6 +266,19 @@ static void Proto_HandleFrame(void)
     {
         len32 = (uint32_t)data[0] | ((uint32_t)data[1] << 8)
               | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+
+        /* ★ 与 DATA 分支同一条门禁：没有活动会话时不做任何会话动作。
+         *   不能省 —— Proto_Init() 把两个计数清 0 后，一条 len32=0 的野 END
+         *   会满足 `len32 == g_ota_len_expected(0) && g_ota_rx_total(0) == 0`，
+         *   拿到一个 RSP_OK（Upd_OnDownloadComplete 内部虽有 total_len==0 的
+         *   兜底、不会真写 Flash，但对一个无意义帧回"验收通过"本身就是错的），
+         *   且与 DATA 分支"无会话就 ERR"的行为自相矛盾。 */
+        if (g_ota_active == 0u)
+        {
+            SendAck(RSP_ERR);
+            return;
+        }
+
         if (n >= 4u && len32 == g_ota_len_expected && g_ota_rx_total == g_ota_len_expected)
         {
             SendAck(RSP_OK);               /* 本次升级写入验收通过 */

@@ -31,8 +31,35 @@
 #define FRAME_DATA_MAX     1024u       /* 数据区上限 */
 #define FRAME_BUF_SIZE     (12u + FRAME_DATA_MAX)
 
+/* ==================== 升级令牌（OTA_START 数据区尾部的 8 字节） ====================
+ * OTA_START 数据区 = 固件总长 u32(4B) + 令牌(8B)，共 OTA_START_DATA_LEN = 12B。
+ * 两个 u32 按**小端**拼成那 8 字节，上位机侧对应 ota_proto.py 的
+ * `struct.pack("<II", OTA_TOKEN_W0, OTA_TOKEN_W1)` —— 改一边必须同步改另一边。
+ *
+ * 当前令牌 = 字节 02 00 00 06 00 06 02 02（**不是**可读 ASCII，所以上位机侧
+ * 不接受直接输入这串字节，而是按 16 位 hex 输入，见 ota_proto.parse_token）。
+ * 日志/回显里也一律用 hex，不要 decode 成字符串。
+ *
+ * ★★ 令牌的定位，不要误解它的强度：
+ *   它的作用是**拦截误触发** —— 别的程序/端口扫描/拿错固件的上位机把 START
+ *   打到这个端口上时，不再能顺手擦掉整个下载区。它**不是**用来防住有意的攻击者：
+ *   本仓库是公开的，这两个常量明文可见，而帧格式与 CRC 表也在 tools/ 里公开，
+ *   照着拼一个合法 START 是分分钟的事。
+ *   ★ 真要把强度提到"能防攻击者"，必须把令牌挪出公开仓库。这里用 #ifndef 包住
+ *     就是为了留这条路：在 Keil 的 C/C++ -> Define 里加
+ *     OTA_TOKEN_W0=.../OTA_TOKEN_W1=...（或用被 .gitignore 排除的私有头），
+ *     本文件一行都不用改，只需在上位机侧同步 ota_proto.py 的两个常量。
+ *     —— 现状是"硬编码进源码"，属于已知限制，README 的"已知限制"一节有记录。 */
+#ifndef OTA_TOKEN_W0
+#define OTA_TOKEN_W0       0x06000002u   /* 小端展开 = 字节 02 00 00 06 */
+#endif
+#ifndef OTA_TOKEN_W1
+#define OTA_TOKEN_W1       0x02020600u   /* 小端展开 = 字节 00 06 02 02 */
+#endif
+#define OTA_START_DATA_LEN 12u           /* 固件总长 u32 + 令牌 8B */
+
 /* ==================== 命令码 ==================== */
-#define CMD_OTA_START      0x0001u     /* PC->boot：数据=固件总长u32, RSV=目标区 0=A */
+#define CMD_OTA_START      0x0001u     /* PC->boot：数据=固件总长u32+令牌8B, RSV=目标区 0=A */
 #define CMD_OTA_DATA       0x0002u     /* PC->boot：数据=固件块,     RSV=本帧起始偏移u32 */
 #define CMD_OTA_END        0x0003u     /* PC->boot：数据=固件总长u32 */
 #define CMD_RSP_ACK        0x0100u     /* boot->PC：数据=状态码1B */

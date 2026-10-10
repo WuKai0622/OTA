@@ -46,10 +46,12 @@
 | 特性 | 说明 |
 |---|---|
 | **三通道统一协议** | 同一套帧协议状态机跑在 UART(USART3)、ETH(TCP) 与 SPI(ESP32-C3 桥) 上，与物理通道完全解耦 |
-| **会话绑定选路** | 收到 `OTA_START` 时**锁存**发起通道，此后所有 ACK 只走该通道 —— 避免"挂着闲置 ETH 连接却走 WiFi 升级"时 ACK 发错地方 |
+| **会话绑定选路** | 收到 `OTA_START` 时**锁存**发起通道（**仅在没有活动会话时**，避免被拒的 `START` 劫持在跑会话的 ACK 通道），此后所有 ACK 只走该通道 —— 避免"挂着闲置 ETH 连接却走 WiFi 升级"时 ACK 发错地方 |
+| **升级令牌** | `OTA_START` 数据区尾部带 8 字节令牌，**在擦除任何扇区之前**校验 —— 拦掉端口扫描/拿错固件的上位机误触发（强度仅到"防误触发"，见[已知限制](#已知限制)） |
 | **A/B 双分区 + 健康标志** | 新固件先落下载区，校验通过才搬入运行区；掉电可回退，不由半成品固件启动 |
 | **逐帧 stop-and-wait** | 每帧独立 ACK，丢帧/坏帧只重发单帧，不必整包重传 |
 | **幂等重传 / 断点续传** | 每帧携带起始偏移，已提交帧直接回 ACK 不重写 Flash；断线后可原偏移续传 |
+| **下载会话空闲上限** | 常驻下载循环 30s 收不到任何字节即拆会话并跳回运行区 APP —— 设备不会永久卡在 `DL:` |
 | **以太网零拷贝接收** | 基于 lwIP 私有内存池合并 pbuf 与 DMA 缓冲区，每帧省去约 1KB 内存拷贝 |
 | **CRC16-MODBUS 校验** | 覆盖 `[CMD..RSV]`，上位机与 boot 两侧查表逐值相同 |
 | **帧长度越界防护** | `LEN` 超限直接丢弃重扫，防止缓冲区溢出 |
@@ -200,19 +202,41 @@
 
 | 命令 | 值 | 方向 | DATA | RSV |
 |---|---|---|---|---|
-| `CMD_OTA_START` | `0x0001` | PC → boot | 固件总长 (u32) | 目标区（0 = A） |
+| `CMD_OTA_START` | `0x0001` | PC → boot | 固件总长 (u32) **+ 令牌 (8B)** | 目标区（0 = A） |
 | `CMD_OTA_DATA` | `0x0002` | PC → boot | 固件块 (≤1024B) | **本帧起始偏移 (u32)** |
 | `CMD_OTA_END` | `0x0003` | PC → boot | 固件总长 (u32) | — |
 | `CMD_RSP_ACK` | `0x0100` | boot → PC | 状态码 (1B) | 同请求帧的 RSV |
 
 状态码：`RSP_OK = 0` / `RSP_ERR = 1`
 
+### 升级令牌
+
+`OTA_START` 的数据区是 **12 字节**：固件总长 u32（4B）+ 令牌（8B）。
+令牌在**擦除任何扇区之前**校验，不符则直接回 `RSP_ERR`、一个扇区都不动。
+
+> 🔒 **令牌的具体值只在源码里** —— 本 README 与上位机的界面提示都不给出。要填的时候去
+> [`Core/Inc/protocol.h`](Core/Inc/protocol.h) 取 `OTA_TOKEN_W0` / `OTA_TOKEN_W1`，
+> 两个 u32 按小端拼成 8 字节。文档里写明值等于把"填令牌"这个动作代劳了，令牌也就白设了。
+
+- boot 侧：`protocol.h` 的 `OTA_TOKEN_W0` / `OTA_TOKEN_W1`（两个 u32，小端拼成 8 字节）
+- 上位机侧：`tools/ota_proto.py` 的 `OTA_TOKEN`，由同一对 u32 用 `struct.pack("<II", ...)`
+  拼出，并断言展开后确实等于预期的 8 个字节 —— 避免手写 hex 被按大端阅读顺序写错
+- **上位机里怎么填**：令牌是二进制（可能含 `0x00`），不是可读串，所以输入框/`--token` 收的是
+  **16 位 hex**（带空格分隔亦可）；日志回显同样用 hex，不要指望它是可读文本
+- **两端必须同版本**：老上位机只发 4 字节 DATA，会被新 boot 拒绝（fail-closed，正确方向）；
+  新上位机对老 boot 则令牌被静默忽略
+
+> ⚠️ 令牌的强度只到"**拦截误触发**"（端口扫描、拿错固件的上位机），**不是安全边界** ——
+> 本仓库公开，常量明文可见。详见[已知限制](#已知限制)。
+
 ### 升级流程
 
 ```
-① OTA_START(总长 L, 区 A)
-      boot: 校验 L → 擦除整个下载区（典型 1s，最坏 4s）→ ACK(OK)
-      ⚠️ 擦除期间 Flash 总线 stall、CPU 冻结，上位机超时必须 ≥ 8s
+① OTA_START(总长 L, 令牌, 区 A)
+      boot: 校验数据区长度(12B) → 校验令牌 → 校验 L → 擦除整个下载区（典型 1s，最坏 4s）→ ACK(OK)
+      ⚠️ 擦除期间 Flash 总线 stall、CPU 冻结，上位机超时必须 ≥ 擦除耗时（实测 1.03s、
+         规格最坏 4s）。当前 START_TIMEOUT = 4.5s，且它**不是越大越好** —— 上界由 5s
+         等待窗口给出（T ≤ D + 5s）。完整推导见 tools/README.md 的"两个必须知道的超时约束"。
 
 ② OTA_DATA(off, ≤1024B)   ← 逐帧，每帧等本偏移的 ACK(OK) 才发下一帧
       boot: off == 已写总数  → 正常写入   → ACK(OK)
@@ -296,8 +320,14 @@ bootloader/                     ← 本目录即 bootloader 工程根
 
 上电后 Bootloader 先运行，并在 **5 秒窗口**内等待上位机连接：
 
-- 收到合法 `OTA_START` → 进入下载会话，常驻等待升级
+- 收到合法 `OTA_START`（长度 12B + 令牌相符）→ 进入下载会话，常驻等待升级
 - 窗口内无人连接 → 跳转到 `APP_RUN_ADDR` 运行既有 APP
+- 下载会话中**连续 30 秒没有任何字节到达**（`BOOT_DL_IDLE_MS`）→ 判定上位机已放弃
+  （拔线 / 关窗口 / 上位机死机 / 换通道），拆除会话并尝试跳回运行区 APP，
+  而不是永远停在 `DL:` 等一个不会来的数据帧
+  > 一旦这样退回 APP，想再升级就需要**复位设备**（APP 自身没有网络能力，这是既有架构限制）。
+  > 30 秒的取值依据见 `protocol.h` / `Bootloader.h` 的注释：正常会话里最长的**合法**静默
+  > 约 6 秒（stop-and-wait 的重发前静默），30 秒有约 5 倍余量。
 
 ### 网络配置
 
@@ -332,22 +362,24 @@ py -m pip install pyserial PySide6
 py tools/host_qt/main.py
 ```
 
-三通道选项卡 → 选择固件 `.bin` → 开始升级 → 日志 + 进度条。
+三通道选项卡 → 选择固件 `.bin` → **填写令牌**（必填，16 位 hex，取值见 `Core/Inc/protocol.h`）→ 开始升级 → 日志 + 进度条。
 
 ### 无界面 CLI
 
+令牌是**必填项**，除 `--selftest` 外每条命令都要带 `--token <16位hex>`（漏填或凑不足 8 字节会在发第一个字节前报错退出）。取值见 `Core/Inc/protocol.h` 的 `OTA_TOKEN_W0/W1`。
+
 ```bash
 # 以太网通道（推荐，最快）
-py tools/ota_host.py --tcp 192.168.1.2:5001 firmware.bin
+py tools/ota_host.py --tcp 192.168.1.2:5001 firmware.bin --token <16位hex>
 
 # 蓝牙通道（COM 口为 HC-05 配对后的 SPP 虚拟串口）
-py tools/ota_host.py COM5 firmware.bin --baud 19200
+py tools/ota_host.py COM5 firmware.bin --token <16位hex> --baud 19200
 
 # 功能性测试开关
-py tools/ota_host.py --tcp 192.168.1.2:5001 fw.bin --probe       # 只探测通道是否通
-py tools/ota_host.py --tcp 192.168.1.2:5001 fw.bin --inject-err  # 注入坏帧，验证重发
-py tools/ota_host.py --tcp 192.168.1.2:5001 fw.bin --oversize    # 伪造越界固件，验证拒绝
-py tools/ota_host.py --selftest                                  # CRC 一致性自检（不连设备）
+py tools/ota_host.py --tcp 192.168.1.2:5001 fw.bin --token <16位hex> --probe       # 只探测通道是否通
+py tools/ota_host.py --tcp 192.168.1.2:5001 fw.bin --token <16位hex> --inject-err  # 注入坏帧，验证重发
+py tools/ota_host.py --tcp 192.168.1.2:5001 fw.bin --token <16位hex> --oversize    # 伪造越界固件，验证拒绝
+py tools/ota_host.py --selftest                                                   # CRC 一致性自检（不连设备，不需要令牌）
 ```
 
 > **固件上限 128KB**。超限时 `OTA_START` 会被拒绝。
@@ -439,7 +471,8 @@ __set_PRIMASK(primask);
 | 限制 | 说明 | 影响 |
 |---|---|---|
 | **单连接模型** | `ota_accept_cb` 中新连接会 `tcp_abort` 掉旧连接 | 多机位并发升级需扩展会话管理 |
-| **无设备侧会话超时** | boot 一旦进入下载会话就常驻等待，不会主动放弃 | 断线后需复位设备；换来的是不会被中途踢回 APP |
+| **下载会话 30s 空闲上限** | `BOOT_DL_IDLE_MS = 30000`：连续 30s 无字节到达即拆会话并跳回运行区 APP | 上位机中途停顿 >30s 会被判为放弃、退回 APP，**想再升级需复位设备**；换来的是设备不会永久卡在 `DL:`（长时间无人值守所必需） |
+| **令牌只能拦误触发** | `OTA_TOKEN_W0/W1` 硬编码在公开源码里，且帧格式与 CRC 表也在 `tools/` 公开 | **不是安全边界**：挡不住有意的攻击者。暴露到不可信网络的部署必须先走 `#ifndef` 把令牌挪出仓库，并补传输层加密/认证 |
 | **无看门狗** | 有意不加 —— Flash 擦除期间总线 stall、CPU 冻结，喂狗逻辑难以兼顾 | 卡死需人工复位 |
 | **上位机无自动重连** | CLI 断线后重试耗尽即退出，不重连 | 断线需重跑，但设备侧支持原偏移续传 |
 | **蓝牙通道吞吐低** | HC-05 需降至 19200 换稳定性，单帧 1036B 约需 0.55s | 整包升级耗时远高于以太网 |

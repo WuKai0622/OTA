@@ -123,6 +123,21 @@ static uint16_t RingRead(uint8_t *out, uint16_t max)
     return n;
 }
 
+/* 丢弃环中全部未消费字节（会话拆除时用：让下一次会话从干净状态开始）。
+ * ★ 必须进临界区：g_ring_head 由生产者（UART 空闲中断 / ETH 接收回调）写，
+ *   与 Bootloader_RingWrite 是同一把锁。__set_PRIMASK 恢复调用前的中断状态，
+ *   因此在 ISR 内部调用同样安全（同 RingWrite 的说明）。
+ * ★ tail == head 即"空"（沿用 RingWrite 里"留一格区分空/满"的约定）。 */
+static void RingFlush(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    g_ring_tail = g_ring_head;
+    g_ring_src  = OTA_CH_NONE;
+    __set_PRIMASK(primask);
+}
+
 /* ==================== 协议层发送出口（三通道择路） ====================
  * ★ 这里**只负责照着 ch 发**，不再判断"谁连着"。
  *   为什么：加 SPI 通道之前这里是"发送时刻看 TCP 通不通，通则走网口、否则串口"。
@@ -208,6 +223,7 @@ void Bootloader_Run(void)
 {
     uint32_t t0 = HAL_GetTick();
     uint32_t left;
+    uint32_t t_last;                       /* 常驻循环的空闲计时基准，循环入口才赋值 */
     uint8_t  session = 0u;
 
     /* ① BOOT_WAIT_MS 窗口：喂协议 + 喂网口 + 喂 SPI + LCD 倒计时；
@@ -252,6 +268,12 @@ void Bootloader_Run(void)
      *    一直收帧，LCD 实时显示已写入下载区A的字节数，直至 OTA_END 跳转 */
     LCD_Clear(BLACK);
     LCD_DisplayString_color(10, 10, 16, (u8 *)"DL:", 65535, 0);
+
+    /* ★ 计时基准必须在**这里**赋值，不能放在函数开头：
+     *   上面的 5s 等待窗口与 Upd_StartupLaunch()（B 回拷路径可能几秒）都在此之前，
+     *   从函数入口起算会让常驻循环的**第一轮就立刻判定超时**。 */
+    t_last = HAL_GetTick();
+
     for (;;)
     {
         /* ★ 常驻下载循环同样要跑 SPI 事务，理由与上面窗口期那一处完全相同。
@@ -260,9 +282,43 @@ void Bootloader_Run(void)
         OTA_Spi_Poll();
 
         MX_LWIP_Process();     /* 下载全程靠它收发：擦写 Flash 的间隙也要回到这里 */
+
+        /* 本通道/本会话还活着 = 这一轮确实有字节到达。
+         * ★ 取在 Bootloader_Task() **之前**：任务会把环消费空，之后 RingCount()
+         *   恒为 0，放后面就永远刷新不了计时。
+         * ★ 这不是"任何字节"而是"任何**投递进环**的字节"：SPI 的状态/心跳字节
+         *   走 s_status/s_hb，不进环，所以不会把一条已经死掉的会话伪装成活着的。 */
+        if (RingCount() > 0u)
+        {
+            t_last = HAL_GetTick();
+        }
+
         Bootloader_Task();
         LCD_DisplayNum_color(50, 10, g_dl_off, 6, 16, 0, 65535, 0);
         OTA_Spi_ShowDiag(10u, 40u);
+
+        /* ---- 空闲超时：拆会话 + 尝试回到运行区 APP（不返回则不回来了） ----
+         * (HAL_GetTick() - t_last) 是 uint32 回绕安全的写法，与上面窗口期同一惯用法；
+         * BOOT_DL_IDLE_MS(30000) ≪ 2^31，无需额外处理。 */
+        if ((HAL_GetTick() - t_last) >= BOOT_DL_IDLE_MS)
+        {
+            /* ★★ 只对"确实有会话在跑"的超时做恢复。
+             *   常驻循环也可能是"5s 窗口超时 + 无有效固件可跳"进来的（session==0），
+             *   那一路上电时已经做过启动决策；再每 30s 重做一次，会在 update.c 的
+             *   "固化中断"/"回拷失败"那几个**停留**路径上反复擦写 B 区/运行区扇区，
+             *   与 update.c 里"本次停留、下次上电再试"的设计意图直接冲突。
+             *   加了这道判断，恢复对每次会话只做一次（Proto_Init 会清掉
+             *   g_ota_active，下一轮就进不来了）。 */
+            if (Proto_SessionStarted() != 0u)
+            {
+                Proto_Init();          /* 全会话复位（运行期重入是设计内行为） */
+                RingFlush();           /* 丢掉死会话残留的半截帧，下次从干净状态起 */
+                Upd_StartupLaunch();   /* 跳转则不返回；返回=无 APP 可跳，继续等 */
+            }
+            /* ★ 恢复可能已耗时数秒（擦写 Flash），必须重设计时，
+             *   否则下一轮立刻又满足超时条件，变成连续空转。 */
+            t_last = HAL_GetTick();
+        }
     }
 }
 

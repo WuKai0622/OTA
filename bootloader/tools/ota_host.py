@@ -5,7 +5,7 @@ OTA 无界面联调 CLI —— 对 Bootloader 帧协议做真机验证。
 用法：
     py tools/ota_host.py <COM> <bin文件>                     # UART 串口
     py tools/ota_host.py --tcp 192.168.1.2:5001 <bin文件>   # ETH 网口（连 boot 的 TCP 服务器）
-    py tools/ota_host.py --tcp 192.168.1.50:5001 <bin文件>  # wifi 模组透传
+    py tools/ota_host.py --tcp 192.168.4.1:5001 <bin文件>   # wifi 透传（ESP32 默认 AP 模式）
 
     <bin文件> 后还可加：
       --probe        只发 OTA_START 探测通道是否通（不发数据）
@@ -103,12 +103,37 @@ def wait_ack(link, timeout=3.0, expect_rsv=None):
 
 
 # 逐帧确认与重发参数
-# ★ START_TIMEOUT 必须是 8s：F407 的最小擦除单位是扇区（最小 128KB），收到 OTA_START
-#   后 boot 要先把整个下载区擦掉才会回 ACK。即使只传几十 KB 的固件，也要擦掉一整块
-#   128KB 扇区 —— 典型 1s、最坏 4s，且擦除期间 Flash 总线 stall、CPU 冻结。
-#   F103 时代的 3.0s 会把这段正常擦除误判成"无应答"而重发，重发又触发一次全擦，
-#   来回几次都成功不了。
-START_TIMEOUT = 8.0
+# ★★【2026-10-10 定值：8.0 → 3.0 → 4.5】这个常量同时管两件事，判据如下（都是
+#   tools/ota_timing_sim.py 扫出来的，不是推的 —— 改完请重跑那个脚本核对，
+#   不带 --timeouts 时它量的就是这里配的值）：
+#
+#   ① 重发节奏。它真正约束的是一个延迟 D = **"设备吃掉这一帧 → boot 窗口重新打开"**
+#      （APP 轮询 → 复位 → boot 初始化）。被吃掉的每一帧都会把窗口推到"吃掉时刻 + D"，
+#      而下一次重发在 T 之后，所以能不能连上的判据就是 **T ≥ D**
+#      （上界 T ≤ D + 5s 由 BOOT_WAIT_MS 给出）。
+#      · 原值 8.0 覆盖的 D 是 [3, 8]s —— 恰好把 D < 3s 那一半漏在洞外，而"APP 一看
+#        到东西就复位"正是 D ≈ 0.5s 这种最常见的情况。于是症状是"复位后第一次连不上，
+#        之后就再也没有一次能连上"。4.5 覆盖 D ∈ [0, 4.5]s。
+#      · ★ 反直觉的一点：**T 不是越大越好**。T 超过约 5s（窗口宽度）之后，覆盖区间会
+#        从 [0, T] 变成 {0} ∪ [T-5, T]，即"复位越快越连不上"。所以 T 要压在窗口宽度以内。
+#      · START_RETRY 基本无用：每次被吃掉都会重新把窗口推到 +D，多发的几次重发只是
+#        把同一个实验重做一遍（实测 3 次与 5 次的覆盖区间完全相同）。
+#
+#   ② 等 START 的 ACK 的耐心。那个 ACK 要等 boot 把整个下载区擦完才回来：F407 单 bank，
+#      最小擦除单位是 128KB 扇区（与固件大小无关），实测 1.03~1.20s、ST 规格最坏 4s，
+#      且擦除期间 Flash 总线 stall、CPU 冻结。约束是 **T ≥ 擦除耗时**，否则重发会砸在
+#      正在擦除的 boot 上：它擦完才处理那一帧 → **再擦一遍**（1~4s 白花），且已经发出去
+#      的 DATA 帧会被"擦除中"顶掉、走一次 DATA 重发。实测擦除 1.2s 时 3.0s 就有 2.5 倍
+#      余量；但若真出现 ST 规格的 4s 擦除，3.0s / 4.0s 都会触发上面这套（脚本里
+#      --erase 4.0 可复现），4.5 才干净。
+#
+#   ⇒ 合计：T 的可用区间是 [max(D, 擦除耗时), D + 5s]。取 **4.5** —— 覆盖 D ≤ 4.5s，
+#     且 4.5 > 4s（ST 规格的最坏擦除）所以永不重擦；按实测擦除 1.2s 还有 3.75 倍余量。
+#   ★ 2 和 3 的取舍都验证过：T=3 覆盖 D ≤ 3s（实测 1.2s 擦除下也干净）；T=5 覆盖更宽
+#     但已贴到窗口边缘（T ≤ D+5，D 很小时几乎没有余量）。4.5 是两边都留了余量的那个点。
+#   ★ 长期方案仍是让 boot 对"长度相同的重复 START"去重（不再二次擦除），那时 ② 消失，
+#     T 只需满足 ①，可以再放大。
+START_TIMEOUT = 4.5
 START_RETRY   = 3
 DATA_TIMEOUT  = 3.0   # 单帧等 ACK。UART@115200 下 1036B 帧约 90ms；ETH 下是瞬时的
 DATA_RETRY    = 10
@@ -132,8 +157,9 @@ END_RETRY     = 3
 LAST_TIMING = {}   # {"erase": 秒, "data": 秒}
 
 
-def run_ota(link, fw: bytes, inject_err: bool):
-    """执行一次完整升级流程（逐帧确认 + 超时重发），返回 (ok, 总帧数, 说明)。"""
+def run_ota(link, fw: bytes, inject_err: bool, token: bytes):
+    """执行一次完整升级流程（逐帧确认 + 超时重发），返回 (ok, 总帧数, 说明)。
+    token = 已校验过的 8 字节令牌（见 P.parse_token），随 OTA_START 一起发出。"""
     chunks = P.split_firmware(fw)
     total_len = len(fw)
     LAST_TIMING.clear()
@@ -143,7 +169,7 @@ def run_ota(link, fw: bytes, inject_err: bool):
     # START：等 ACK；应答丢失/坏帧则整帧重发
     start_ok = False
     for attempt in range(1, START_RETRY + 1):
-        link.send(P.build_ota_start(total_len, target=0))
+        link.send(P.build_ota_start(total_len, target=0, token=token))
         ack = wait_ack(link, timeout=START_TIMEOUT, expect_rsv=0)
         if ack is not None:
             if ack.ok:
@@ -215,6 +241,13 @@ def main():
     ap.add_argument("--inject-err", action="store_true", help="注入坏帧")
     ap.add_argument("--oversize", action="store_true", help="伪造越界固件")
     ap.add_argument("--probe", action="store_true", help="只发 OTA_START 探测")
+    # ★ 必填，而且**不用 argparse 的 required=True**：那样 --selftest 也会被拦住，
+    #   而自检根本不连设备、不需要令牌。改成下面手工校验（见 selftest 分支之后）。
+    ap.add_argument("--token", metavar="HEX16", default=None,
+                    help="OTA_START 令牌，必填 16 位 hex（= 8 字节）。取值见 boot 侧 protocol.h "
+                         "的 OTA_TOKEN_W0/W1（与 tools/ota_proto.py 的同一对常量一致），"
+                         "本文档与本工具的提示里都不给出具体值。"
+                         "空格分隔亦可：--token \"01 23 45 67 89 AB CD EF\"")
     args = ap.parse_args()
 
     if args.selftest:
@@ -222,6 +255,12 @@ def main():
         print("CRC16-MODBUS('123456789') = 0x%04X (期望 0x4B37)" % P.crc16_modbus(b"123456789"))
         print("CRC 表[0..5] =", ["0x%04X" % v for v in P._CRC_TABLE[:6]])
         return
+
+    # 令牌必填：发第一个字节之前就校验掉，避免现场把"令牌错"误读成"链路/固件有问题"
+    try:
+        token = P.parse_token(args.token.strip() if args.token else "")
+    except ValueError as e:
+        ap.error("令牌无效: %s" % e)
 
     # 位置参数的含义随 --tcp 变化：串口模式是 <COM> <bin>，TCP 模式只有 <bin>
     if args.tcp:
@@ -261,15 +300,20 @@ def main():
         sys.exit(1)
 
     try:
+        # 打出来是为了让"START 被拒"可诊断：令牌错和链路/固件问题都表现为 RSP_ERR，
+        # 回显本次实际发出的令牌，至少能排除"是不是我填错了"。
+        # ★ 用 hex 不用 decode：令牌是二进制（含 0x00），decode 出来是控制字符。
+        print("令牌: %s" % P.token_hex(token))
+
         if args.probe:
-            link.send(P.build_ota_start(min(len(fw), P.APP_MAX_SIZE), 0))
+            link.send(P.build_ota_start(min(len(fw), P.APP_MAX_SIZE), 0, token=token))
             ack = wait_ack(link, timeout=START_TIMEOUT)
             print("OTA_START 应答:", "RSP_OK" if ack and ack.ok else ("RSP_ERR" if ack else "无应答"))
             return
         # 耗时统计：计时区间 = 发出 OTA_START 起到收到 END 的 ACK 止，
         # 因此【包含 boot 擦除下载区】那 1~4s（擦除完成才回 START 的 ACK）。
         t0 = time.time()
-        ok, nframes, msg = run_ota(link, fw, inject_err=args.inject_err)
+        ok, nframes, msg = run_ota(link, fw, inject_err=args.inject_err, token=token)
         elapsed = time.time() - t0
 
         print("[4/4] 结果: %s  (帧数=%d, 消息=%s)" % ("成功" if ok else "失败", nframes, msg))

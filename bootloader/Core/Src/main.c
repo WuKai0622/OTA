@@ -103,7 +103,8 @@ int main(void)
   /* ★ 步骤② / ③ 的两套自检（SPI 物理层回环、SPI↔TCP 透传）已在本步删除，
    *   它们的结论已经沉淀成并入了正式流程：SPI 通道现在就是三条 OTA 通道之一，
    *   由 Bootloader_Init() 统一起，主循环统一喂（见 Bootloader_Run）。
-   *   要重新做单项验证，按 docs/OTA_WiFi_SPI通道方案.md 第七节重建。 */
+   *   要重新做单项验证，按 F103 工程 docs/OTA_WiFi_SPI通道方案.md 第七节重建
+   *   （该文档未随本仓库发布）。 */
 
   Bootloader_Init();   /* 帧状态机复位 + 注入发送出口 + 起 TCP 监听 + 起 SPI 通道
                         * + 开串口接收中断。★ MX_SPI2_Init() 必须在它之前跑过。 */

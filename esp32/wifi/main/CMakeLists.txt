@@ -3,7 +3,8 @@
 #
 # 步骤①② 的两套验证固件（tcp_echo.c/.h、spi_slave_loopback.c/.h）已删除 ——
 # 那两步的结论已经沉淀成这里的 `spi_bridge.c` 与接线约定，留着只是死代码。
-# 若要复现那两步的单项验证，按 `OTA/docs/OTA_WiFi_SPI通道方案.md` 第七节重建。
+# 若要复现那两步的单项验证，按 F103 工程的 `docs/OTA_WiFi_SPI通道方案.md` 第七节重建
+# （该文档未随本仓库发布）。
 idf_component_register(SRCS "app_main.c"
                             "wifi_link.c"
                             "tcp_bridge.c"

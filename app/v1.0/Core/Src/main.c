@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "spi.h"
 #include "gpio.h"
 #include "fsmc.h"
 
@@ -27,6 +28,7 @@
 #include "task.h"
 #include "queue.h"
 #include "LCD.h"
+#include "app_ota.h"   /* app 侧的 OTA 触发口（轮询 SPI，看到 PC 的字节就复位回 boot） */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -168,8 +170,10 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_FSMC_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
   LCD_Init();
+  AppOta_Init();   /* 配好片选 PB12（CubeMX 里没这个脚），清事务缓冲。必须在 MX_SPI2_Init 之后 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -182,6 +186,12 @@ int main(void)
 		xTaskCreate(vHealthTask, "Health", 128, NULL, 4, NULL);
 		xTaskCreate(vOLEDTask, "OLED", 128, NULL, 1, NULL);
 	    xTaskCreate(vNumTask, "Num", 128, NULL, 1, NULL);
+		/* OTA 触发任务：优先级最低（1），每 100ms 跑一笔 SPI 事务，约占 1.6% CPU。
+		 * ★ 它走的是**静态分配**（不占 FreeRTOS 堆），栈也给到别的任务的两倍 ——
+		 *   两条理由都写在 app_ota.c 里，这里不重复。一句话：本工程的堆只有 4KB，
+		 *   而堆不够时 xTaskCreate 只是**静默返回失败**（任务从来不存在，
+		 *   表现是"SPI 完全没反应"）。 */
+		AppOta_CreateTask();
 		
 		vTaskStartScheduler();
 	}

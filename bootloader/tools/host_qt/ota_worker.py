@@ -13,12 +13,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import ota_proto as P
 
 # 逐帧确认与重发参数
-# ★ START_TIMEOUT 必须是 8s：F407 的最小擦除单位是扇区（最小 128KB），收到 OTA_START
-#   后 boot 要先把整个下载区擦掉才会回 ACK。即使只传几十 KB 的固件，也要擦掉一整块
-#   128KB 扇区 —— 典型 1s、最坏 4s，且擦除期间 Flash 总线 stall、CPU 冻结。
-#   F103 时代的 3.0s 会把这段正常擦除误判成"无应答"而重发，重发又触发一次全擦，
-#   来回几次都成功不了。
-START_TIMEOUT = 8.0
+# ★★【2026-10-10 定值：8.0 → 3.0 → 4.5】与 ota_host.py 的同名常量必须一致，理由
+#   那一段写在那里（① 覆盖"设备吃掉帧 → 窗口重开"的延迟 D，判据 T ≥ D；
+#   ② 等 ACK 的耐心要盖过擦除下载区的 1~4s，判据 T ≥ 擦除耗时）—— 这里不重复，
+#   只保证两个文件同步改。改完跑 tools/ota_timing_sim.py 核对覆盖范围。
+START_TIMEOUT = 4.5
 START_RETRY   = 3
 DATA_TIMEOUT  = 3.0   # 单帧等 ACK。UART@115200 下 1036B 帧约 90ms；ETH 下是瞬时的
 DATA_RETRY    = 10
@@ -41,10 +40,12 @@ class OtaWorker(QThread):
     progress = Signal(int, int, str)  # (已发帧, 总帧数, 状态文本)
     done = Signal(bool, str)          # (成功?, 摘要)
 
-    def __init__(self, transport, bin_path: str, target: int = 0, parent=None):
+    def __init__(self, transport, bin_path: str, token: bytes, target: int = 0, parent=None):
+        """token = 已由 P.parse_token() 校验过的 8 字节令牌（必填，随 OTA_START 发出）。"""
         super().__init__(parent)
         self._transport = transport
         self._bin_path = bin_path
+        self._token = token
         self._target = target
         self._stop = False
 
@@ -109,12 +110,16 @@ class OtaWorker(QThread):
 
         # 1) START：等 ACK OK（应答丢失则整帧重发）
         self._transport.flush_rx()
+        # 回显令牌：START 被拒时 boot 只回一个 RSP_ERR，与"链路/固件有问题"长得一样，
+        # 打出本次实际发出的令牌，至少能排除"是不是我填错了"这一种可能。
+        # ★ 用 hex 不用 decode：令牌是二进制（含 0x00），decode 出来是控制字符。
+        self.log.emit("令牌: %s" % P.token_hex(self._token))
         start_ok = False
         for attempt in range(1, START_RETRY + 1):
             if self._stop:
                 self._transport.close(); self.done.emit(False, "用户中止")
                 return
-            self._transport.send(P.build_ota_start(len(fw), self._target))
+            self._transport.send(P.build_ota_start(len(fw), self._target, self._token))
             self.log.emit("已发送 OTA_START(总长=%d)，等待应答..." % len(fw))
             ack = self._wait_ack(timeout=START_TIMEOUT, expect_rsv=0)
             if ack is not None:
