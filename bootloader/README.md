@@ -235,8 +235,9 @@
 ① OTA_START(总长 L, 令牌, 区 A)
       boot: 校验数据区长度(12B) → 校验令牌 → 校验 L → 擦除整个下载区（典型 1s，最坏 4s）→ ACK(OK)
       ⚠️ 擦除期间 Flash 总线 stall、CPU 冻结，上位机超时必须 ≥ 擦除耗时（实测 1.03s、
-         规格最坏 4s）。当前 START_TIMEOUT = 4.5s，且它**不是越大越好** —— 上界由 5s
-         等待窗口给出（T ≤ D + 5s）。完整推导见 tools/README.md 的"两个必须知道的超时约束"。
+         规格最坏 4s）。当前第一次等待 START_FIRST_TIMEOUT = 2.0s、其后
+         START_TIMEOUT = 4.5s，且它们**不是越大越好** —— 上界由 5s 等待窗口给出
+         （T ≤ D + 5s）。完整推导见 tools/README.md 的"两个必须知道的超时约束"。
 
 ② OTA_DATA(off, ≤1024B)   ← 逐帧，每帧等本偏移的 ACK(OK) 才发下一帧
       boot: off == 已写总数  → 正常写入   → ACK(OK)

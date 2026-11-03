@@ -11,7 +11,7 @@
 | `ota_proto.py` | 共享协议层：CRC16-Modbus 查表 + 组帧/拆帧/分包。**CRC 表与 boot 的 `protocol.c` 逐值相同** |
 | `ota_host.py` | 无界面 CLI：真机联调 boot 帧协议（支持 UART 与 TCP 两条通道，含坏帧/越界测试） |
 | `host_qt/` | PySide6 图形上位机（UART / ETH / wifi 三通道） |
-| `ota_timing_sim.py` | **离线时序验证（不接板子）**：用虚拟时钟跑真实的 `run_ota()`，扫"设备复位延迟"看 `START_TIMEOUT` 能覆盖多大范围、会不会多擦一遍 |
+| `ota_timing_sim.py` | **离线时序验证（不接板子）**：用虚拟时钟跑真实的 `run_ota()`，扫"设备复位延迟"看 `START_TIMEOUT` 能覆盖多大范围、会不会多擦一遍（第一次等待固定为 `START_FIRST_TIMEOUT`） |
 
 ## 图形上位机（PySide6）
 
@@ -60,7 +60,7 @@ py tools/ota_host.py --selftest                                    # CRC 一致�
 
 ## 离线时序验证（`ota_timing_sim.py`，不接板子）
 
-`START_TIMEOUT` / `START_RETRY` 调多少合适，不用上板子试 —— 这个脚本用虚拟时钟跑**真实的 `run_ota()`**（只换时钟和链路对象，不复制一份逻辑，所以不会和真实实现漂移），扫一遍"设备复位延迟"给出结论：
+`START_TIMEOUT` / `START_RETRY` 调多少合适，不用上板子试 —— 这个脚本用虚拟时钟跑**真实的 `run_ota()`**（只换时钟和链路对象，不复制一份逻辑，所以不会和真实实现漂移），扫一遍"设备复位延迟"给出结论。被扫描的是第 2/3 次的 `START_TIMEOUT`；第一次等待固定用 `ota_host.py` 里的 `START_FIRST_TIMEOUT`（当前 2.0s），所以量到的就是生产配置：
 
 ```bash
 py tools/ota_timing_sim.py                      # 扫 3/5/8 秒，看各自覆盖多大的复位延迟
@@ -84,6 +84,6 @@ boot 采用 **stop-and-wait 逐帧确认**：丢帧/坏帧由单帧重发兜住�
 
 ## 两个必须知道的超时约束
 
-- **`START_TIMEOUT`**（`ota_host.py` 与 `host_qt/ota_worker.py` 各一处，**当前 4.5s**；原 8.0s，曾试 3.0s）。它同时管两件事：**① 重发节奏** —— 真正的判据是 `T ≥ D`，其中 D = "设备吃掉这一帧 → boot 窗口重新打开"的延迟（APP 轮询 → 复位 → boot 初始化）；**② 等 START 的 ACK 的耐心** —— 那个 ACK 要等 boot 把整个下载区擦完才回来（实测 1.03~1.20s、ST 规格最坏 4s），约束是 `T ≥ 擦除耗时`，否则重发会砸在正在擦除的 boot 上导致**再擦一遍**。上界由 `BOOT_WAIT_MS = 5s` 给出（`T ≤ D + 5s`）—— 所以 **T 不是越大越好**：超过约 5s 后覆盖区间会从 `[0, T]` 变成 `{0} ∪ [T-5, T]`，即"复位越快越连不上"，这正是原值 8.0 的症状。可用区间 `[max(D, 擦除耗时), D + 5s]`；现取 **4.5**（覆盖 D ≤ 4.5s，且 4.5 > 4s 永不重擦）。
+- **`START_FIRST_TIMEOUT` / `START_TIMEOUT`**（`ota_host.py` 与 `host_qt/ota_worker.py` 各一处，**当前第一次 2.0s、其后 4.5s**；原统一 4.5s，更早是 8.0s / 3.0s）。它们同时管两件事：**① 重发节奏** —— 真正的判据是 `T ≥ D`，其中 D = "设备吃掉这一帧 → boot 窗口重新打开"的延迟（APP 轮询 → 复位 → boot 初始化）；**② 等 START 的 ACK 的耐心** —— 那个 ACK 要等 boot 把整个下载区擦完才回来（实测 1.03~1.20s、ST 规格最坏 4s），约束是 `T ≥ 擦除耗时`，否则重发会砸在正在擦除的 boot 上导致**再擦一遍**。上界由 `BOOT_WAIT_MS = 5s` 给出（`T ≤ D + 5s`）—— 所以 **T 不是越大越好**：超过约 5s 后覆盖区间会从 `[0, T]` 变成 `{0} ∪ [T-5, T]`，即"复位越快越连不上"，这正是原值 8.0 的症状。可用区间 `[max(D, 擦除耗时), D + 5s]`；现取 **第一次 2.0s、后续 4.5s**：WiFi 通道首帧必被 APP 吃掉、D≈0.5s，2.0s 后的重发落在 boot 的 5s 窗口前段；后续 4.5s 仍覆盖 D ≤ 4.5s 与 ST 最坏擦除 4s。★ 第一次的 2.0s 只覆盖实测擦除 1.03~1.20s（约 1.8 倍余量），**不覆盖最坏 4s**；若现场擦除变慢，可能多擦一遍。
 	**这些判据跑 `py tools/ota_timing_sim.py` 就能自己复现**（不接板子）：它会打印每个 T 覆盖的 D 区间、有没有多擦一遍。`--erase 4.0` 复现最坏擦除下的重复擦除，`--mode buffer` 看 APP 不吃 START 的对照。
 - **`OTA_DATA_CHUNK = 1024`** 对应帧总长 1036B，boot 侧 `TCP_MSS` 必须 **≥ 1036** 才能保证一帧装进单个 TCP 段。当前 [`../LWIP/Target/lwipopts.h`](../LWIP/Target/lwipopts.h) 中为 **`1426`**；若留在默认的 536，每个应用帧会被拆成 2 个 TCP 段。

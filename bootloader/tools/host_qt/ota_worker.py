@@ -13,11 +13,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import ota_proto as P
 
 # 逐帧确认与重发参数
-# ★★【2026-10-10 定值：8.0 → 3.0 → 4.5】与 ota_host.py 的同名常量必须一致，理由
-#   那一段写在那里（① 覆盖"设备吃掉帧 → 窗口重开"的延迟 D，判据 T ≥ D；
-#   ② 等 ACK 的耐心要盖过擦除下载区的 1~4s，判据 T ≥ 擦除耗时）—— 这里不重复，
-#   只保证两个文件同步改。改完跑 tools/ota_timing_sim.py 核对覆盖范围。
-START_TIMEOUT = 4.5
+# ★★【2026-10-10 定值：8.0 → 3.0 → 4.5；2026-11-03 第一次等待改为 2.0】
+#   与 ota_host.py 的同名常量必须一致，理由那一段写在那里（① 覆盖"设备吃掉帧 →
+#   窗口重开"的延迟 D，判据 T ≥ D；② 等 ACK 的耐心要盖过擦除下载区的 1~4s，
+#   判据 T ≥ 擦除耗时；③ 第一次单独取 2.0s 以适配 APP 的 WiFi 触发路径）——
+#   这里不重复，只保证两个文件同步改。改完跑 tools/ota_timing_sim.py 核对覆盖范围。
+START_TIMEOUT       = 4.5   # 第 2/3 次等 ACK
+START_FIRST_TIMEOUT = 2.0   # 第 1 次只等 2s（WiFi 首帧被 APP 吃掉后尽快重发）
 START_RETRY   = 3
 DATA_TIMEOUT  = 3.0   # 单帧等 ACK。UART@115200 下 1036B 帧约 90ms；ETH 下是瞬时的
 DATA_RETRY    = 10
@@ -121,7 +123,9 @@ class OtaWorker(QThread):
                 return
             self._transport.send(P.build_ota_start(len(fw), self._target, self._token))
             self.log.emit("已发送 OTA_START(总长=%d)，等待应答..." % len(fw))
-            ack = self._wait_ack(timeout=START_TIMEOUT, expect_rsv=0)
+            # 第一次 2.0s（WiFi 首帧被 APP 吃掉后尽快重发），其后 4.5s
+            wait_s = START_FIRST_TIMEOUT if attempt == 1 else START_TIMEOUT
+            ack = self._wait_ack(timeout=wait_s, expect_rsv=0)
             if ack is not None:
                 if ack.ok:
                     start_ok = True

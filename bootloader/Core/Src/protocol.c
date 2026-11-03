@@ -192,7 +192,8 @@ static void Proto_HandleFrame(void)
         /* 擦除下载区中固件实际覆盖的全部扇区。
          * ★ F4 的擦除粒度是扇区且最小 128KB —— 即使只有 13KB 固件也要擦一整个
          *   S7（典型 1s、最坏 4s），且擦除期间 Flash 总线 stall、CPU 冻结、lwIP 停摆。
-         *   这段耗时发生在 ACK 之前，上位机的 START_TIMEOUT(当前 4.5s) 必须放宽，且它同时受上界约束（见 tools/README.md）。 */
+         *   这段耗时发生在 ACK 之前，上位机第一次等待(当前 2.0s)必须 ≥ 实测擦除 1~1.2s，
+         *   否则会重发并再擦一遍；第 2/3 次等待 4.5s 覆盖 ST 规格最坏值。见 tools/README.md。 */
         if (Flash_EraseRegion(APP_DL_ADDR, len32) != 0u)
         {
             SendAck(RSP_ERR);              /* 擦除失败：拒绝本次升级 */

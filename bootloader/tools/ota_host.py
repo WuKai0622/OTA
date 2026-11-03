@@ -103,9 +103,9 @@ def wait_ack(link, timeout=3.0, expect_rsv=None):
 
 
 # 逐帧确认与重发参数
-# ★★【2026-10-10 定值：8.0 → 3.0 → 4.5】这个常量同时管两件事，判据如下（都是
-#   tools/ota_timing_sim.py 扫出来的，不是推的 —— 改完请重跑那个脚本核对，
-#   不带 --timeouts 时它量的就是这里配的值）：
+# ★★【2026-10-10 定值：8.0 → 3.0 → 4.5；2026-11-03 第一次等待改为 2.0】判据如下
+#   （都是 tools/ota_timing_sim.py 扫出来的，不是推的 —— 改完请重跑那个脚本核对；
+#   它扫的是第 2/3 次的 START_TIMEOUT，第一次固定用 START_FIRST_TIMEOUT）：
 #
 #   ① 重发节奏。它真正约束的是一个延迟 D = **"设备吃掉这一帧 → boot 窗口重新打开"**
 #      （APP 轮询 → 复位 → boot 初始化）。被吃掉的每一帧都会把窗口推到"吃掉时刻 + D"，
@@ -127,13 +127,22 @@ def wait_ack(link, timeout=3.0, expect_rsv=None):
 #      余量；但若真出现 ST 规格的 4s 擦除，3.0s / 4.0s 都会触发上面这套（脚本里
 #      --erase 4.0 可复现），4.5 才干净。
 #
-#   ⇒ 合计：T 的可用区间是 [max(D, 擦除耗时), D + 5s]。取 **4.5** —— 覆盖 D ≤ 4.5s，
-#     且 4.5 > 4s（ST 规格的最坏擦除）所以永不重擦；按实测擦除 1.2s 还有 3.75 倍余量。
-#   ★ 2 和 3 的取舍都验证过：T=3 覆盖 D ≤ 3s（实测 1.2s 擦除下也干净）；T=5 覆盖更宽
-#     但已贴到窗口边缘（T ≤ D+5，D 很小时几乎没有余量）。4.5 是两边都留了余量的那个点。
-#   ★ 长期方案仍是让 boot 对"长度相同的重复 START"去重（不再二次擦除），那时 ② 消失，
-#     T 只需满足 ①，可以再放大。
-START_TIMEOUT = 4.5
+#   ③ ★ 2026-11-03：**第一次等待单独取 2.0s**（START_FIRST_TIMEOUT），其后仍用 4.5s。
+#      原因：走 WiFi 通道时首帧必被正在运行的 APP 吃掉（APP 在 SPI 上看到字节就复位），
+#      D 通常只有 0.5s 左右。4.5s 虽然能覆盖，但重发点已经贴到 boot 那条 5s 窗口
+#      [D, D+5] 的后段；压到 2.0s 后重发落在窗口前段，余量最大。
+#      代价要清楚：这 2.0s 同时是"等擦除 ACK"的耐心，只覆盖实测 1.03~1.20s
+#      （本板 1.11s，约 1.8 倍余量），不再覆盖 ST 规格的 4s 最坏值。真遇到慢擦除，
+#      重发会砸在擦除中的 boot 上再擦一遍 —— 第 2/3 次的 4.5s 仍按最坏值留了余量。
+#      若 APP 刚启动（它自己有 2.5s 的首轮延时），2.0s 那次也会被吃掉；第二次在
+#      2.0 + 4.5 = 6.5s 发出，仍落在 D≈3s 打开的窗口 [3, 8] 内。
+#
+#   ⇒ 合计：等待值 T 的可用区间是 [max(D, 擦除耗时), D + 5s]。现取 **第一次 2.0s、
+#     后续 4.5s**：第一次按 D≈0.5s 的场景优化，后续 4.5 同时覆盖 D ≤ 4.5s 与
+#     擦除 ≤ 4s。★ 2 和 3 的取舍都验证过：T=3 覆盖 D ≤ 3s；T=5 已贴到窗口边缘。
+#   ★ 长期方案仍是让 boot 对"长度相同的重复 START"去重（不再二次擦除），那时 ② 消失。
+START_TIMEOUT       = 4.5   # 第 2/3 次等 ACK（要同时覆盖 boot 初始化与最坏擦除）
+START_FIRST_TIMEOUT = 2.0   # ★ 第 1 次只等 2s：WiFi 首帧被 APP 吃掉后尽快重发
 START_RETRY   = 3
 DATA_TIMEOUT  = 3.0   # 单帧等 ACK。UART@115200 下 1036B 帧约 90ms；ETH 下是瞬时的
 DATA_RETRY    = 10
@@ -170,7 +179,11 @@ def run_ota(link, fw: bytes, inject_err: bool, token: bytes):
     start_ok = False
     for attempt in range(1, START_RETRY + 1):
         link.send(P.build_ota_start(total_len, target=0, token=token))
-        ack = wait_ack(link, timeout=START_TIMEOUT, expect_rsv=0)
+        # ★ 第一次用较短的 2.0s：WiFi 通道首帧会被正在运行的 APP 吃掉，
+        #   尽快重发才能落进 APP 复位后 boot 新开的窗口。后续用 4.5s，
+        #   覆盖 boot 初始化 + ST 规格的最坏擦除（见文件顶部说明 ③）。
+        wait_s = START_FIRST_TIMEOUT if attempt == 1 else START_TIMEOUT
+        ack = wait_ack(link, timeout=wait_s, expect_rsv=0)
         if ack is not None:
             if ack.ok:
                 start_ok = True

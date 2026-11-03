@@ -295,13 +295,14 @@ void vAppOtaTask(void *arg)
          *   降到 5 笔/秒：这没关系，它本来也不该空转。
          *
          * ★ 100ms 这个数的余量（判据来自 bootloader/tools/ota_timing_sim.py）：
-         *   上位机的 START_TIMEOUT 现在是 4.5s，而它真正约束的是一个延迟
+         *   上位机第一次 START 等待现在是 2.0s（START_FIRST_TIMEOUT，其后 4.5s），
+         *   而它真正约束的是一个延迟
          *       D = "设备吃掉这一帧 → boot 窗口重新打开"
          *         ≈ 0.2s + 0.3~0.6s（0.2s 是"帧进 C3 的接收环"到"我们在 MISO 上看见"
          *             的最坏延迟：它要先经 C3 的一次 BuildNextTx 才摆上总线，
          *             所以最多跨两笔轮询；后半段是复位 + boot 初始化），
          *   判据是 **T ≥ D**（并且 T ≤ D + 5s，5s 是 BOOT_WAIT_MS）。
-         *   100ms 的轮询给 D 只加了 0.1s，对 4.5s 的预算来说是 10 倍以上的余量，
+         *   100ms 的轮询给 D 只加了 0.1s，对 2.0s 的预算来说是 20 倍以上的余量，
          *   而"更快"没有任何好处：PC 那一帧要么被我们吃掉、要么被 boot 收下，
          *   中间没有第三种状态。 */
         vTaskDelay(pdMS_TO_TICKS(APP_OTA_POLL_MS));

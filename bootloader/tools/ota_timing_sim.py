@@ -3,11 +3,13 @@
 OTA_START 重发时序离线验证 —— 不接板子，用虚拟时钟跑【真实】的 ota_host.run_ota()。
 
 为什么需要它：
-  START_TIMEOUT 同时管两件事（见 ota_host.py 那段注释）——【START 的重发节奏】要和
-  boot 的 BOOT_WAIT_MS(5s) 上电窗口对齐，【等 START 的 ACK 的耐心】要盖过擦除下载区的
-  1~4s。这两件事什么时候打架，只在"设备复位"这一个场景下才暴露，而那个场景要等 APP
-  侧的 SPI 轮询做完才能上板子复现。本脚本把那个场景搬到 PC 上，扫一遍"复位延迟"，
-  直接给出：**哪些复位延迟连得上、哪些连不上、会不会多擦一遍**。
+  START_TIMEOUT / START_FIRST_TIMEOUT 同时管两件事（见 ota_host.py 那段注释）——
+  【START 的重发节奏】要和 boot 的 BOOT_WAIT_MS(5s) 上电窗口对齐，【等 START 的 ACK
+  的耐心】要盖过擦除下载区的 1~4s。这两件事什么时候打架，只在"设备复位"这一个场景下
+  才暴露，而那个场景要等 APP 侧的 SPI 轮询做完才能上板子复现。本脚本把那个场景搬到
+  PC 上，扫一遍"复位延迟"，直接给出：**哪些复位延迟连得上、哪些连不上、会不会多擦一遍**。
+  ★ 被扫描的 T 是第 2/3 次的 START_TIMEOUT；第一次等待固定用 ota_host.py 的
+    START_FIRST_TIMEOUT（当前 2.0s）—— 这样量到的就是生产配置的真实行为。
 
 ★ 它跑的是真代码：run_ota / wait_ack / build_ota_start / FrameScanner 全部来自
   ota_host / ota_proto，只换掉两样 ——
@@ -227,6 +229,9 @@ def run_one(timeout, retries, open_delay, erase_s, window_s, mode, re_reset):
     clock = VClock()
     ota_host.time = clock                 # ★ 见 VClock 的注释
     ota_host.START_TIMEOUT = timeout
+    # ★ 第一次等待保持 ota_host.py 的生产值（START_FIRST_TIMEOUT=2.0），本脚本扫的是
+    #   第 2/3 次的 T。若把第一次也强行设成 T，量到的就不是生产配置（2.0 前、4.5 后），
+    #   而是一套并不存在的"统一 T"—— 会把 D>2s 的场景误判成连不上。
     ota_host.START_RETRY = retries
 
     dev = DevModel(open_delay, erase_s, window_s, mode, re_reset)
@@ -289,7 +294,7 @@ def sweep(timeout, retries, args):
 def main():
     ap = argparse.ArgumentParser(description="OTA_START 重发时序离线验证（不接板子）")
     ap.add_argument("--timeouts", default=None,
-                    help="要对比的 START_TIMEOUT（秒，逗号分隔）。"
+                    help="要对比的 START_TIMEOUT（第 2/3 次等待，秒，逗号分隔）。"
                          "★ 默认不是写死的候选值，而是**读 ota_host.py 里当前配的那个** "
                          "—— 不这样，改了常量再跑脚本就会量到别的值，白验一遍")
     ap.add_argument("--retries", default="3",
@@ -317,9 +322,10 @@ def main():
     print("OTA START retry timing simulation (no board, virtual clock)")
     print("  erase=%.2fs  window=%.2fs  open-delay sweep=0.00..%.2f step=%.2f  mode=%s"
           % (args.erase, args.window, args.rmax, args.step, args.mode))
-    print("  START_TIMEOUT under test: %s"
+    print("  START_TIMEOUT (2nd/3rd try) under test: %s"
           % ", ".join("%.2fs%s" % (t, "  (from ota_host.py)" if args.timeouts is None else "")
                       for t in tos))
+    print("  START_FIRST_TIMEOUT (1st try, fixed): %.2fs" % ota_host.START_FIRST_TIMEOUT)
     if args.mode == "app" and not args.no_re_reset:
         print("  model: the APP eats every START it sees and resets again "
               "(the loop we are trying to break)")
