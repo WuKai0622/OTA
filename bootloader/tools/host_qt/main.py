@@ -6,7 +6,7 @@ OTA 上位机入口（PySide6）。
     py tools/host_qt/main.py
 
 通道（三条都走同一套帧协议，boot 侧汇入同一个接收环）：
-    UART 串口   —— 直连 boot 的 USART3（有线直连 115200，挂蓝牙透传则降到 9600~19200）
+    UART 串口   —— USB-TTL 直连 boot 的 USART3（115200 8N1，与 boot 默认一致）
     ETH 网口    —— TCP client 连 boot 侧 lwip/tcp server，默认 192.168.1.2:5001
     wifi 模组   —— TCP client 连 wifi 模组透传目标（设备侧仍是同一个 boot）
 """

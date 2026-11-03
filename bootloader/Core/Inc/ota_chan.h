@@ -18,7 +18,7 @@
 typedef enum
 {
     OTA_CH_NONE = 0,        /* 未知/未绑定：会话尚未开始 */
-    OTA_CH_UART,            /* USART3（蓝牙） */
+    OTA_CH_UART,            /* USART3（USB-TTL 串口） */
     OTA_CH_ETH,             /* TCP 服务器（lwIP） */
     OTA_CH_SPI              /* SPI 从机 ←→ ESP32-C3 ←→ WiFi/TCP */
 } OtaChan_t;

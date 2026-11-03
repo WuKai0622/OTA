@@ -211,7 +211,7 @@ class SerialTab(QWidget):
         self.baud = QLineEdit("115200")
         lay.addWidget(self.baud, 1, 1)
         note = QLabel("说明：boot 的串口通道是 USART3（帧协议与 ETH 通道共用同一个接收环）。\n"
-                      "有线直连时 115200 即可；若这一头挂的是蓝牙透传模组，需降到 9600~19200。")
+                      "USB-TTL 直连时填 115200 8N1，与 boot 默认值一致。")
         note.setStyleSheet("color:#888;")
         lay.addWidget(note, 2, 0, 1, 3)
         self.setLayout(lay)

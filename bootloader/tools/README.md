@@ -22,7 +22,7 @@ py tools/host_qt/main.py         # 启动
 
 界面：三个通道选项卡 → 选择固件 `.bin` → **填写令牌** → 开始升级 → 日志 + 进度条。
 
-- **UART 串口**：直连 boot 的 USART3，**19200 8N1**（boot 固件里写死 19200，见 [`../Core/Src/usart.c`](../Core/Src/usart.c)）。⚠️ **`--baud` 的默认值是 115200，与 boot 不匹配**，走串口必须显式给 `--baud 19200`。这一头挂 HC-05 蓝牙透传时，SPP 虚拟串口的波特率设置不影响空中链路（模组串口侧另行配置），照给 `--baud 19200` 即可。
+- **UART 串口**：USB-TTL 直连 boot 的 USART3，**115200 8N1**（boot 固件里写死 115200，见 [`../Core/Src/usart.c`](../Core/Src/usart.c)）。CLI 与图形界面的默认波特率就是 **115200**，与 boot 一致，通常无需改动；改了 boot 侧才需要显式给 `--baud`。实测 28 652 B 整包 **5.54 s**（擦除 1.11 s + 传输 4.37 s，传输段 52.5 kbps）。
 - **ETH 网口**：boot 侧是 TCP 服务器（静态 IP `192.168.1.2`，端口 `5001`），上位机作为 client 主动连接。
 - **wifi 模组**：同样是 TCP client。ESP32-C3 默认 AP 模式（见 [`../../esp32/wifi/main/wifi_link.h`](../../esp32/wifi/main/wifi_link.h)）：自己开热点 `OTA_ESP32` / `12345678`，地址固定 **`192.168.4.1`**，端口 `5001`，先把 PC 连上该热点。改成 STA 模式则没有固定 IP，填模组打印出来的那个地址。
 - **令牌**：必填，须与 boot 侧 [`../Core/Inc/protocol.h`](../Core/Inc/protocol.h) 的 `OTA_TOKEN_W0/W1` 一致。令牌是**二进制**（可能含 `0x00`）、不是可读串，所以按 **16 位 hex** 填（带空格分隔也可）。**取值只写在源码里，本文档不给** —— 写了就等于把"填令牌"代劳掉。**留空则拒绝开始**（不会预填默认值 —— 预填会让它退化成"看都没看就点开始"）。
@@ -35,11 +35,11 @@ py tools/host_qt/main.py         # 启动
 > 是保留的重定向运算符，把带尖括号的示例直接粘进终端会先报一个语法错。
 
 ```bash
-# UART 通道（波特率必须显式给：boot 的 USART3 是 19200，CLI 默认 115200 不匹配）
-py tools/ota_host.py COM5 x.bin --token <16位hex> --baud 19200              # 正常升级
-py tools/ota_host.py COM5 x.bin --token <16位hex> --baud 19200 --probe      # 只发 OTA_START（见"已知问题"）
-py tools/ota_host.py COM5 x.bin --token <16位hex> --baud 19200 --inject-err # 破坏一个数据帧 -> 应触发重发
-py tools/ota_host.py COM5 x.bin --token <16位hex> --baud 19200 --oversize   # ⚠️ 当前不可用，见"已知问题"
+# UART 通道（波特率默认 115200，与 boot 的 USART3 一致）
+py tools/ota_host.py COM5 x.bin --token <16位hex>              # 正常升级
+py tools/ota_host.py COM5 x.bin --token <16位hex> --probe      # 只发 OTA_START（见"已知问题"）
+py tools/ota_host.py COM5 x.bin --token <16位hex> --inject-err # 破坏一个数据帧 -> 应触发重发
+py tools/ota_host.py COM5 x.bin --token <16位hex> --oversize   # ⚠️ 当前不可用，见"已知问题"
 
 # TCP 通道（ETH / wifi）
 py tools/ota_host.py --tcp 192.168.1.2:5001 x.bin --token <16位hex>
@@ -51,7 +51,7 @@ py tools/ota_host.py --selftest                                    # CRC 一致�
 
 漏填 `--token`、或填的内容凑不出 8 字节（既不是 16 位 hex，长度也不是 8 个字符）时，CLI 在**发第一个字节之前**就报错退出（`令牌无效: ...`）—— 因为设备侧"令牌错"和"链路/固件有问题"都只表现为一个 `RSP_ERR`，不在本地拦掉就会在板子前反复排查错方向。注意这条校验只查**格式**，不查值对不对（上位机不知道 boot 里烧的是哪个令牌）。
 
-固件上限 **128KB**（`ota_proto.APP_MAX_SIZE`，须与 boot 的 `flash_if.h` 保持一致）。串口通道的波特率必须与 boot 的 USART3 一致：**19200**（CLI 默认值 115200 不匹配，须显式 `--baud 19200`）。
+固件上限 **128KB**（`ota_proto.APP_MAX_SIZE`，须与 boot 的 `flash_if.h` 保持一致）。串口通道的默认波特率 **115200** 与 boot 的 USART3 一致；若改了 boot 侧，两侧必须同步（`--baud` 或界面输入）。
 
 ### ⚠️ 当前版本的两个已知问题
 

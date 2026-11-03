@@ -138,7 +138,7 @@ START_RETRY   = 3
 DATA_TIMEOUT  = 3.0   # 单帧等 ACK。UART@115200 下 1036B 帧约 90ms；ETH 下是瞬时的
 DATA_RETRY    = 10
 # 超时后的静默退避，下标=第几次失败后的静默秒数（只走错误路径）。
-# ★ 原值 [4,5,8,8...] 是给 HC-05 弱链路留 RF 恢复时间的；现在走有线 UART / ETH，
+# ★ 原值 [4,5,8,8...] 是给弱链路留恢复时间的；现在走有线 UART / ETH，
 #   偶发一次超时基本都是瞬时拥塞，退避 4~8s 纯属浪费（ETH 上 TCP 自己还会重传）。
 RETRY_QUIET  = [0.5, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
 # 帧间停顿：原为 0.02s（防极端背靠背）。实测它吃掉以太网通道约 29% 的传输时间 ——
@@ -235,8 +235,8 @@ def main():
     ap.add_argument("--tcp", metavar="HOST:PORT", default=None,
                     help="改走 TCP 通道(ETH/wifi)，如 192.168.1.2:5001；省略则走串口")
     ap.add_argument("--baud", type=int, default=115200,
-                    help="串口波特率(默认 115200)。有线链路不必降速；"
-                         "仅当串口那一头挂的是蓝牙透传模组时才需要降到 9600~19200")
+                    help="串口波特率(默认 115200，与 boot 的 USART3 一致)；"
+                         "改了 boot 侧才需要同步改这里")
     ap.add_argument("--selftest", action="store_true", help="CRC 一致性自检（不连设备）")
     ap.add_argument("--inject-err", action="store_true", help="注入坏帧")
     ap.add_argument("--oversize", action="store_true", help="伪造越界固件")
